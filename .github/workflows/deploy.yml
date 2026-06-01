@@ -1,0 +1,70 @@
+name: Build data & deploy to Pages
+
+on:
+  push:
+    branches: [main]          # redeploy on any change you push
+  schedule:
+    - cron: "0 6 8 * *"       # monthly refresh, 8th @ 06:00 UTC (after SNCA publishes)
+  workflow_dispatch:           # manual "Run workflow" button
+
+permissions:
+  contents: write              # commit the refreshed data file
+  pages: write                 # publish to GitHub Pages
+  id-token: write              # required by deploy-pages
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Heavy data refresh only on schedule / manual runs (downloads ~170 MB).
+      # A normal push just redeploys the existing data file.
+      - name: Refresh data
+        if: github.event_name != 'push'
+        run: |
+          pip install requests openpyxl
+          python build_data.py --months 72 --append
+
+      - name: Commit refreshed data
+        if: github.event_name != 'push'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain data/registrations.json)" ]; then
+            git add data/registrations.json
+            git commit -m "data: refresh registrations ($(date +%Y-%m))"
+            git push
+          else
+            echo "No data changes."
+          fi
+
+      # Publish only the static site (index.html + data), not the scripts.
+      - name: Assemble site
+        run: |
+          mkdir -p _site/data
+          cp index.html _site/index.html
+          cp data/registrations.json _site/data/registrations.json
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
