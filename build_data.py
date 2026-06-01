@@ -127,39 +127,50 @@ def download(url, dest):
 
 # ============================ parse =========================================
 def iter_rows_xlsx(path):
-    """Stream rows from the data sheet, matching headers loosely."""
-    from openpyxl import load_workbook
-    wb = load_workbook(path, read_only=True, data_only=True)
-    need_norm = {_norm(c): c for c in NEED}
+    """Stream rows from the data sheet, matching headers loosely.
 
-    # Peek the first row of every sheet and pick the one with the most matches.
-    cand = []
+    The SNCA export ships a wrong/minimal <dimension> tag, which makes
+    openpyxl's read-only mode read only the first column. We bypass that by
+    passing an explicit wide column range (max_col) to iter_rows.
+    """
+    from openpyxl import load_workbook
+    PROBE = 256                                   # read up to this many columns
+    wb = load_workbook(path, read_only=True, data_only=True)
+
+    def header_of(ws):
+        first = next(ws.iter_rows(min_row=1, max_row=1, max_col=PROBE, values_only=True), None)
+        return list(first) if first else []
+
+    # Pick the sheet whose first row matches the most known columns.
+    best = None
     for name in wb.sheetnames:
-        ws = wb[name]
-        first = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
-        headers = ["" if h is None else str(h) for h in (first or [])]
-        hn = [_norm(h) for h in headers]
+        hdr = header_of(wb[name])
+        hn = [_norm("" if h is None else h) for h in hdr]
         matched = sum(1 for c in NEED if _norm(c) in hn)
-        cand.append((matched, name, headers, hn))
-    cand.sort(key=lambda x: -x[0])
-    matched, name, headers, hn = cand[0]
+        if best is None or matched > best[0]:
+            best = (matched, name, hdr, hn)
+    matched, name, hdr, hn = best
 
     essential_found = [c for c in ESSENTIAL if _norm(c) in hn]
     if len(essential_found) < len(ESSENTIAL):
+        seen = [h for h in hdr if h not in (None, "")]
         wb.close()
         raise SystemExit(
             "\n*** COLUMN MISMATCH — cannot parse this file ***\n"
             f"Best sheet: '{name}' (matched {matched}/{len(NEED)} known columns).\n"
             f"Essential columns found: {essential_found} of {ESSENTIAL}.\n"
-            f"HEADERS SEEN ({len(headers)}): {headers}\n"
+            f"HEADERS SEEN ({len(seen)}): {seen}\n"
             "Copy the HEADERS SEEN line above so the column mapping can be fixed.\n")
 
-    print(f"· data sheet '{name}': matched {matched}/{len(NEED)} columns")
+    ncols = max([i for i, h in enumerate(hdr) if h not in (None, "")], default=-1) + 1
     idx = {c: hn.index(_norm(c)) for c in NEED if _norm(c) in hn}
+    print(f"· data sheet '{name}': matched {matched}/{len(NEED)} columns, {ncols} cols wide")
 
     ws = wb[name]
-    for i, row in enumerate(ws.iter_rows(values_only=True)):
-        if i == 0 or row is None:        # skip header row
+    # Large max_row + explicit max_col defeat the broken <dimension>; read_only
+    # still stops at the real end of data, so the high bound is harmless.
+    for row in ws.iter_rows(min_row=2, max_row=5_000_000, max_col=ncols, values_only=True):
+        if row is None:
             continue
         yield {c: (row[idx[c]] if c in idx and idx[c] < len(row) else None) for c in NEED}
     wb.close()
