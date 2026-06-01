@@ -21,6 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0       # full history so the rebase below works cleanly
 
       - uses: actions/setup-python@v5
         with:
@@ -34,15 +36,19 @@ jobs:
           pip install requests openpyxl
           python build_data.py --months 72 --append
 
+      # Commit + push the refreshed data. Non-fatal: even if the push loses a
+      # race, the deploy below still publishes the freshly-built data.
       - name: Commit refreshed data
         if: github.event_name != 'push'
+        continue-on-error: true
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if [ -n "$(git status --porcelain data/registrations.json)" ]; then
             git add data/registrations.json
             git commit -m "data: refresh registrations ($(date +%Y-%m))"
-            git push
+            git pull --rebase --autostash origin main || true
+            git push origin HEAD:main || echo "push race; deploy will still publish the fresh data"
           else
             echo "No data changes."
           fi
