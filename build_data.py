@@ -29,7 +29,7 @@ OUT = "data/registrations.json"
 DRIVETRAINS = ["BEV", "PHEV", "HEV", "Petrol", "Diesel", "Other"]
 
 # Columns we read (canonical SNCA codes). Loose matching handles case/spacing.
-NEED = ["CATSTC", "LIBMRQ", "TYPCOM", "LIBCRB",
+NEED = ["CATSTC", "CODEOP", "LIBMRQ", "TYPCOM", "LIBCRB", "CODCRB",
         "DATCIRPRM", "DATCIR_GD", "AUTOELEC", "CONSELEC",
         "CO2WLTP", "INFCO2"]
 ESSENTIAL = ["CATSTC", "DATCIR_GD", "LIBMRQ"]   # without these we cannot proceed
@@ -46,20 +46,65 @@ def _norm(s):
     return re.sub(r"[^A-Z0-9]", "", str(s).upper())
 
 
-def classify_drivetrain(libcrb, autoelec, conselec):
+def classify_drivetrain(libcrb, codcrb, autoelec, conselec):
+    """Classify drivetrain. Primary signal is the unambiguous fuel CODE (CODCRB);
+    the human label (LIBCRB) is only a fallback.
+       PEV       -> BEV   (pure electric)
+       OVC-HEV   -> PHEV  (Off-Vehicle Charging = plug-in hybrid)
+       NOVC-HEV  -> HEV   (Not OVC = regular/mild hybrid)
+       STD       -> Petrol/Diesel
+       DUAL      -> Other (bi-fuel, e.g. LPG/CNG)
+    """
+    code = (codcrb or "").upper().replace(" ", "")
     s = (libcrb or "").upper()
-    has_elec_range = _num(autoelec) > 0 or _num(conselec) > 0
-    if any(k in s for k in ("RECHARGEABLE", "PLUG-IN", "PLUG IN", "HYBRIDE RECH")):
-        return "PHEV"
-    if "ELEC" in s or s in ("BEV", "EV"):
+    if code.startswith("PEV") or code in ("BEV", "EV"):
         return "BEV"
-    if "HYBRID" in s or "HYBRIDE" in s:
-        return "PHEV" if has_elec_range else "HEV"
-    if "ESSENCE" in s or "PETROL" in s or "BENZIN" in s:
-        return "Petrol"
+    if code.startswith("NOVC-HEV") or code.startswith("NOVCHEV"):
+        return "HEV"
+    if code.startswith("OVC-HEV") or code.startswith("OVCHEV"):
+        return "PHEV"
+    if code.startswith("STD"):
+        return "Diesel" if "DIESEL" in s else "Petrol"
+    if code.startswith("DUAL"):
+        return "Other"
+    # ---- fallback: parse the label, hybrids BEFORE pure-electric so that
+    #      'Hybride Electrique …' is never mistaken for a BEV ----
+    if "PLUG-IN" in s or "RECHARGEABLE" in s:
+        return "PHEV"
+    if "HYBRID" in s:
+        return "PHEV" if _num(autoelec) > 0 else "HEV"
+    if "PUR ELECTR" in s or s.strip() in ("ELECTRIQUE", "ELECTRIC", "ELECTRICITE"):
+        return "BEV"
+    if "ELECTR" in s and ("ESSENCE" in s or "DIESEL" in s):  # combined => hybrid
+        return "HEV"
+    if "ELECTR" in s:
+        return "BEV"
     if "DIESEL" in s or "GASOIL" in s or "GAZOLE" in s:
         return "Diesel"
+    if "ESSENCE" in s or "PETROL" in s or "BENZIN" in s:
+        return "Petrol"
+    if "LPG" in s or "GPL" in s or "CNG" in s or "GAZ" in s:
+        return "Other"
     return "Other"
+
+
+def classify_operation(codeop, d_first, d_lu):
+    """new vs import, using the authoritative operation code when available.
+       N  -> new registration
+       I  -> import (used vehicle previously registered abroad)
+       E/E1/H -> export/suspension: not an in-fleet registration, skip
+       T/blank/other -> resold car whose code drifted; recover the original
+                        nature from the dates (needed for historical months).
+    Returns 'new', 'import', or None (skip).
+    """
+    c = (codeop or "").strip().upper()
+    if c == "N":
+        return "new"
+    if c == "I":
+        return "import"
+    if c in ("E", "E1", "H"):
+        return None
+    return "new" if d_first >= d_lu else "import"
 
 
 def _num(x):
@@ -181,7 +226,9 @@ def iter_rows_xml(path):
     rec = {}
     for ev, el in ET.iterparse(path, events=("end",)):
         tag = el.tag.upper()
-        if tag in NEED:
+        if tag == "OPE":                 # XML uses <OPE>; xlsx uses CODEOP
+            rec["CODEOP"] = el.text
+        elif tag in NEED:
             rec[tag] = el.text
         elif el.tag.lower() == "vehicle":
             yield {c: rec.get(c) for c in NEED}
@@ -212,10 +259,13 @@ def build(path, snapshot_ym, keep_months=None):
             continue
         ym = f"{d_lu.year:04d}-{d_lu.month:02d}"
         d_first = _parse_date(v.get("DATCIRPRM")) or d_lu
-        op = "new" if d_first >= d_lu else "import"
+        op = classify_operation(v.get("CODEOP"), d_first, d_lu)
+        if op is None:
+            continue
         brand = (v.get("LIBMRQ") or "UNKNOWN").strip().title() or "UNKNOWN"
         model = (v.get("TYPCOM") or "").strip().upper() or "—"
-        dtrain = classify_drivetrain(v.get("LIBCRB"), v.get("AUTOELEC"), v.get("CONSELEC"))
+        dtrain = classify_drivetrain(v.get("LIBCRB"), v.get("CODCRB"),
+                                     v.get("AUTOELEC"), v.get("CONSELEC"))
         key = (ym, seg, op, brand, model, dtrain)
         counts[key] += 1
         co2 = _num(v.get("CO2WLTP")) or _num(v.get("INFCO2"))
