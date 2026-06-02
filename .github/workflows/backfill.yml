@@ -1,0 +1,78 @@
+name: Backfill full history
+
+# One-time (chunked) build of the full month-by-month history since 2017.
+# Processes a chunk of snapshots per run, commits, and deploys — so it is
+# resumable and self-completing. Runs daily until the whole history is built,
+# or trigger it manually to go faster. Once complete, daily runs are no-ops.
+
+on:
+  workflow_dispatch:
+    inputs:
+      chunk:
+        description: "How many months (snapshots) to process this run"
+        default: "24"
+        required: false
+  schedule:
+    - cron: "0 3 * * *"      # daily 03:00 UTC until history is complete
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330      # stay safely under the 6h job limit
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install requests openpyxl
+
+      - name: Backfill a chunk of months
+        run: python backfill.py --limit ${{ github.event.inputs.chunk || '24' }}
+
+      - name: Commit progress
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain data/registrations.json)" ]; then
+            git add data/registrations.json
+            git commit -m "backfill: history progress ($(date +%F))"
+            git pull --rebase --autostash origin main || true
+            git push origin HEAD:main || echo "push race; deploy still publishes"
+          else
+            echo "Nothing new to backfill — history is complete."
+          fi
+
+      - name: Assemble site
+        run: |
+          mkdir -p _site/data
+          cp index.html _site/index.html
+          cp data/registrations.json _site/data/registrations.json
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: backfill
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
