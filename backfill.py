@@ -75,8 +75,8 @@ def aggregate_file(path, wanted_months):
         op = bd.classify_operation(v.get("CODEOP"), d_first, d_lu)
         if op is None:
             continue
-        brand = (v.get("LIBMRQ") or "UNKNOWN").strip().title() or "UNKNOWN"
-        model = (v.get("TYPCOM") or "").strip().upper() or "—"
+        brand = str(v.get("LIBMRQ") or "").strip().title() or "UNKNOWN"
+        model = str(v.get("TYPCOM") or "").strip().upper() or "—"
         dtr = bd.classify_drivetrain(v.get("LIBCRB"), v.get("CODCRB"),
                                      v.get("AUTOELEC"), v.get("CONSELEC"))
         co2 = bd._num(v.get("CO2WLTP")) or bd._num(v.get("INFCO2"))
@@ -90,15 +90,18 @@ def aggregate_file(path, wanted_months):
 
 
 def load_master():
-    """Load existing data/registrations.json into a flat dict + done months."""
+    """Load existing data/registrations.json. Returns (master, backfilled).
+    All existing months are loaded (so nothing disappears mid-backfill), but
+    only months listed in meta.backfilled count as 'accurately sourced' — the
+    approximate build_data months get re-sourced and overwritten."""
     master = defaultdict(lambda: [0, 0, 0])
-    done = set()
+    backfilled = set()
     if os.path.exists(bd.OUT):
         o = json.load(open(bd.OUT, encoding="utf-8"))
         src = (o.get("meta", {}).get("source", "") or "").lower()
         if "synthetic" in src or "sample" in src:
             print("· ignoring existing sample data (starting clean).")
-            return master, done
+            return master, backfilled
         d = o["dims"]
         for r in o["rows"]:
             key = (d["months"][r[0]], d["segments"][r[1]], d["operations"][r[2]],
@@ -106,16 +109,20 @@ def load_master():
             master[key][0] += r[6]
             master[key][1] += r[7] if len(r) > 7 else 0
             master[key][2] += r[8] if len(r) > 8 else 0
-            done.add(d["months"][r[0]])
-    return master, done
+        backfilled = set(o.get("meta", {}).get("backfilled", []))
+        print(f"· loaded {len({k[0] for k in master})} existing months; "
+              f"{len(backfilled)} already accurately backfilled")
+    return master, backfilled
 
 
-def write_master(master, snapshot_label):
+def write_master(master, snapshot_label, backfilled):
     months = sorted({k[0] for k in master})
     segs = ["car", "van", "bus"]; ops = ["new", "import"]
     mi = {m: i for i, m in enumerate(months)}
     brands, bi = [], {}; models, midx = [], {}; rows = []
     for (ym, seg, op, brand, model, dtr), vals in master.items():
+        if vals[0] == 0:
+            continue
         if brand not in bi:
             bi[brand] = len(brands); brands.append(brand)
         mk = (bi[brand], model)
@@ -129,6 +136,7 @@ def write_master(master, snapshot_label):
             "source": "Parc Automobile du Luxembourg (SNCA) via data.public.lu — CC0",
             "source_snapshot": f"backfill→{snapshot_label}",
             "latest_month": months[-1] if months else None,
+            "backfilled": sorted(backfilled),
             "note": "Each month sourced from the snapshot taken right after it "
                     "(accurate full-history backfill).",
         },
@@ -156,10 +164,13 @@ def main():
     print(f"· found {len(snaps)} snapshot(s) to consider"
           + (f" ({snaps[0][0]}…{snaps[-1][0]})" if snaps else ""))
     master, done = load_master()
-    print(f"· already have {len(done)} months")
+
+    # Newest-first for bulk runs: corrects the most recent months first
+    # (so the live dashboard is accurate immediately) and extends backward.
+    order = snaps if args.latest else list(reversed(snaps))
 
     processed = 0
-    for ym, url in snaps:                          # ascending
+    for ym, url in order:
         target = prev_month(ym)                    # newest complete month in this snapshot
         if target < args.frm or target in done:
             continue
@@ -172,21 +183,27 @@ def main():
             agg = aggregate_file(path, {target})
         except SystemExit as e:
             print(f"! skipping {ym}: {e}")
-            os.remove(path) if os.path.exists(path) else None
+            if os.path.exists(path):
+                os.remove(path)
             continue
         kept = sum(v[0] for v in agg.values())
-        for k, v in agg.items():
-            master[k][0] += v[0]; master[k][1] += v[1]; master[k][2] += v[2]
+        if agg:
+            # overwrite this month with the freshly-sourced version
+            for k in [k for k in master if k[0] == target]:
+                del master[k]
+            for k, v in agg.items():
+                master[k] = [v[0], v[1], v[2]]
+        else:
+            print(f"  · {target}: no rows in this snapshot (kept existing).")
         done.add(target)
-        write_master(master, ym)                   # persist after each month (resumable)
-        try:
+        write_master(master, ym, done)             # persist after each month (resumable)
+        if os.path.exists(path):
             os.remove(path)
-        except OSError:
-            pass
         processed += 1
-        print(f"  ✓ {target}: {kept} registrations  (months so far: {len(done)})")
+        print(f"  ✓ {target}: {kept} registrations  (accurate months: {len(done)})")
 
-    print(f"\n· done. processed {processed} new month(s); {len(done)} months total → {bd.OUT}")
+    print(f"\n· done. processed {processed} month(s) this run; "
+          f"{len(done)} accurate months total → {bd.OUT}")
 
 
 if __name__ == "__main__":
