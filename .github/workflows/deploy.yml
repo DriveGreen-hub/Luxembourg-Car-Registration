@@ -28,13 +28,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Heavy data refresh only on schedule / manual runs (downloads ~170 MB).
-      # A normal push just redeploys the existing data file.
+      # Monthly maintenance: add ONLY the newest complete month, accurately,
+      # without overwriting the backfilled history. Cheap (one download).
       - name: Refresh data
         if: github.event_name != 'push'
         run: |
           pip install requests openpyxl
-          python build_data.py --months 72 --append
+          python backfill.py --latest
 
       # Commit + push the refreshed data. Non-fatal: even if the push loses a
       # race, the deploy below still publishes the freshly-built data.
