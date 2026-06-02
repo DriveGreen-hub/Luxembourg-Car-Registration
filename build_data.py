@@ -29,7 +29,7 @@ OUT = "data/registrations.json"
 DRIVETRAINS = ["BEV", "PHEV", "HEV", "Petrol", "Diesel", "Other"]
 
 # Columns we read (canonical SNCA codes). Loose matching handles case/spacing.
-NEED = ["CATSTC", "CODEOP", "LIBMRQ", "TYPCOM", "LIBCRB", "CODCRB",
+NEED = ["CATSTC", "LIBCAR", "CODEOP", "LIBMRQ", "TYPCOM", "LIBCRB", "CODCRB",
         "DATCIRPRM", "DATCIR_GD", "AUTOELEC", "CONSELEC",
         "CO2WLTP", "INFCO2"]
 ESSENTIAL = ["CATSTC", "DATCIR_GD", "LIBMRQ"]   # without these we cannot proceed
@@ -371,6 +371,8 @@ def main():
     ap.add_argument("--file")
     ap.add_argument("--months", type=int, default=None)
     ap.add_argument("--append", action="store_true")
+    ap.add_argument("--categories", action="store_true",
+                    help="just print the CATSTC categories + labels + counts and exit")
     args = ap.parse_args()
 
     if args.file:
@@ -381,6 +383,24 @@ def main():
         ym, url, _ = resolve_latest_xlsx()
         path = download(url, os.path.join(CACHE, f"parc-{ym}.xlsx"))
         snapshot = ym
+
+    if args.categories:
+        from collections import Counter
+        cnt = Counter(); label = {}
+        for v in iter_rows(path):
+            c = str(v.get("CATSTC"))
+            cnt[c] += 1
+            if c not in label:
+                label[c] = str(v.get("LIBCAR") or "")
+        print("\n  count   CATSTC  label                                     current segment")
+        print("  " + "-" * 74)
+        for code, n in cnt.most_common(60):
+            try:
+                seg = SEGMENT_BY_CAT.get(int(float(code)))
+            except Exception:
+                seg = None
+            print(f"  {n:8d}  {code:>5}  {label[code][:40]:40}  {seg or '(skipped)'}")
+        return
 
     obj = build(path, snapshot, keep_months=args.months)
 
