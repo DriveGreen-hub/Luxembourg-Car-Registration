@@ -55,8 +55,8 @@ def classify_drivetrain(libcrb, codcrb, autoelec, conselec):
        STD       -> Petrol/Diesel
        DUAL      -> Other (bi-fuel, e.g. LPG/CNG)
     """
-    code = (codcrb or "").upper().replace(" ", "")
-    s = (libcrb or "").upper()
+    code = str(codcrb if codcrb is not None else "").upper().replace(" ", "")
+    s = str(libcrb if libcrb is not None else "").upper()
     if code.startswith("PEV") or code in ("BEV", "EV"):
         return "BEV"
     if code.startswith("NOVC-HEV") or code.startswith("NOVCHEV"):
@@ -97,7 +97,7 @@ def classify_operation(codeop, d_first, d_lu):
                         nature from the dates (needed for historical months).
     Returns 'new', 'import', or None (skip).
     """
-    c = (codeop or "").strip().upper()
+    c = str(codeop if codeop is not None else "").strip().upper()
     if c == "N":
         return "new"
     if c == "I":
@@ -262,8 +262,8 @@ def build(path, snapshot_ym, keep_months=None):
         op = classify_operation(v.get("CODEOP"), d_first, d_lu)
         if op is None:
             continue
-        brand = (v.get("LIBMRQ") or "UNKNOWN").strip().title() or "UNKNOWN"
-        model = (v.get("TYPCOM") or "").strip().upper() or "—"
+        brand = str(v.get("LIBMRQ") or "").strip().title() or "UNKNOWN"
+        model = str(v.get("TYPCOM") or "").strip().upper() or "—"
         dtrain = classify_drivetrain(v.get("LIBCRB"), v.get("CODCRB"),
                                      v.get("AUTOELEC"), v.get("CONSELEC"))
         key = (ym, seg, op, brand, model, dtrain)
