@@ -8,6 +8,11 @@ name: Backfill full history
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: "What to run"
+        type: choice
+        default: "backfill"
+        options: ["backfill", "categories"]
       chunk:
         description: "How many months (snapshots) to process this run"
         default: "24"
@@ -41,7 +46,12 @@ jobs:
         run: pip install requests openpyxl
 
       - name: Backfill a chunk of months
+        if: github.event.inputs.mode != 'categories'
         run: python backfill.py --limit ${{ github.event.inputs.chunk || '24' }}
+
+      - name: Inspect vehicle categories (diagnostic only)
+        if: github.event.inputs.mode == 'categories'
+        run: python build_data.py --categories
 
       - name: Commit progress
         run: |
