@@ -45,7 +45,7 @@ SEGMENTS = ["car", "van", "bus", "hdv"]   # display / storage order
 # Bump whenever parsing/classification logic changes in a way that should force a
 # full rebuild of already-processed months (the backfill compares this to the value
 # stored in the data file and starts clean on a mismatch).
-DATA_VERSION = 2
+DATA_VERSION = 3
 
 def segment_of(catstc, cateu):
     """car/van/bus come from the validated national code (CATSTC);
@@ -138,16 +138,31 @@ def _num(x):
 
 
 def _parse_date(x):
-    if not x:
+    if x is None or x == "":
         return None
     if isinstance(x, dt.datetime):
         return x.date()
     if isinstance(x, dt.date):
         return x
+    # Excel serial date: days since 1899-12-30 (Windows epoch). Older snapshots can
+    # ship date columns as bare numbers when the cell lost its date formatting.
+    if isinstance(x, (int, float)) and not isinstance(x, bool):
+        n = int(x)
+        if 20000 <= n <= 80000:                # ~1954 .. ~2089, sane reg-date range
+            try:
+                return dt.date(1899, 12, 30) + dt.timedelta(days=n)
+            except Exception:
+                return None
+        return None
     x = str(x).strip()
     if not x:
         return None
-    for f in ("%d/%m/%Y", "%Y-%m-%d", "%d.%m.%Y", "%Y%m%d", "%d/%m/%y", "%m/%d/%Y"):
+    if x.isdigit() and 4 < len(x) <= 5:        # numeric string that is really a serial
+        n = int(x)
+        if 20000 <= n <= 80000:
+            return dt.date(1899, 12, 30) + dt.timedelta(days=n)
+    for f in ("%d/%m/%Y", "%Y-%m-%d", "%d.%m.%Y", "%Y%m%d", "%d-%m-%Y",
+              "%d/%m/%y", "%m/%d/%Y", "%Y/%m/%d"):
         try:
             return dt.datetime.strptime(x[:10], f).date()
         except ValueError:
@@ -173,6 +188,19 @@ def resolve_latest_xlsx():
         sys.exit("Could not find an XLSX resource in the dataset.")
     print(f"· latest: {best[2]}  ({best[0]})")
     return best
+
+
+def list_all_xlsx():
+    import requests
+    r = requests.get(DATASET_API, timeout=60)
+    r.raise_for_status()
+    out = {}
+    for it in r.json().get("resources", []):
+        title = (it.get("title") or "")
+        m = re.search(r"(\d{6})", title)
+        if title.lower().endswith(".xlsx") and m:
+            out[m.group(1)] = it["url"]
+    return out
 
 
 def download(url, dest):
@@ -393,7 +421,45 @@ def main():
     ap.add_argument("--append", action="store_true")
     ap.add_argument("--categories", action="store_true",
                     help="just print the CATSTC categories + labels + counts and exit")
+    ap.add_argument("--inspect", metavar="YYYYMM", default=None,
+                    help="download ONE snapshot and dump its structure + sample rows, then exit")
     args = ap.parse_args()
+
+    if args.inspect:
+        snaps = list_all_xlsx()
+        keys = sorted(snaps)
+        print(f"· {len(keys)} snapshots available: {keys[0]} … {keys[-1]}")
+        ym = args.inspect
+        if ym not in snaps:
+            later = [k for k in keys if k >= ym]
+            ym = later[0] if later else keys[-1]
+            print(f"· {args.inspect} not found; using nearest = {ym}")
+        path = download(snaps[ym], os.path.join(CACHE, f"inspect-{ym}.xlsx"))
+        from openpyxl import load_workbook
+        wb = load_workbook(path, read_only=True, data_only=True)
+        print(f"\n=== snapshot {ym} ===\nsheets: {wb.sheetnames}")
+        for name in wb.sheetnames:
+            ws = wb[name]
+            rows = list(ws.iter_rows(min_row=1, max_row=4, max_col=256, values_only=True))
+            print(f"\n--- sheet '{name}' (showing header + 3 rows) ---")
+            if rows:
+                hdr = [(i, h) for i, h in enumerate(rows[0]) if h not in (None, "")]
+                print(f"  header ({len(hdr)} non-empty): {hdr[:45]}")
+            for r in rows[1:4]:
+                cells = [(i, repr(v), type(v).__name__)
+                         for i, v in enumerate(r) if v not in (None, "")][:45]
+                print(f"  row: {cells}")
+        print("\n-- parsed key fields via iter_rows (first 5 rows; shows value + python type) --")
+        try:
+            for i, v in enumerate(iter_rows(path)):
+                if i >= 5:
+                    break
+                print({k: (repr(v.get(k)), type(v.get(k)).__name__)
+                       for k in ["CATSTC", "CATEU", "DATCIR_GD", "DATCIRPRM",
+                                 "CODEOP", "LIBMRQ", "LIBCRB"]})
+        except SystemExit as e:
+            print(f"  iter_rows could not parse this file: {e}")
+        return
 
     if args.file:
         path = args.file
