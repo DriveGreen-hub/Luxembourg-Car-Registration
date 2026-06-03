@@ -29,16 +29,30 @@ OUT = "data/registrations.json"
 DRIVETRAINS = ["BEV", "PHEV", "HEV", "Petrol", "Diesel", "Other"]
 
 # Columns we read (canonical SNCA codes). Loose matching handles case/spacing.
-NEED = ["CATSTC", "LIBCAR", "CODEOP", "LIBMRQ", "TYPCOM", "LIBCRB", "CODCRB",
+NEED = ["CATSTC", "CATEU", "LIBCAR", "CODEOP", "LIBMRQ", "TYPCOM", "LIBCRB", "CODCRB",
         "DATCIRPRM", "DATCIR_GD", "AUTOELEC", "CONSELEC",
         "CO2WLTP", "INFCO2"]
 ESSENTIAL = ["CATSTC", "DATCIR_GD", "LIBMRQ"]   # without these we cannot proceed
 
 # national category (CATSTC) -> dashboard segment
 SEGMENT_BY_CAT = {}
-for c in [1]:                      SEGMENT_BY_CAT[c] = "car"
-for c in [32, 33]:                 SEGMENT_BY_CAT[c] = "van"
-for c in [71, 72, 73, 74, 75, 76]: SEGMENT_BY_CAT[c] = "bus"
+for c in [1]:                          SEGMENT_BY_CAT[c] = "car"
+for c in [32, 33]:                     SEGMENT_BY_CAT[c] = "van"
+for c in [71, 72, 73, 74, 75, 76, 89]: SEGMENT_BY_CAT[c] = "bus"
+
+SEGMENTS = ["car", "van", "bus", "hdv"]   # display / storage order
+
+def segment_of(catstc, cateu):
+    """car/van/bus come from the validated national code (CATSTC);
+    HDV (heavy goods, >3.5t) comes from the EU category N2/N3, which is the
+    only field that cleanly separates heavy trucks from vans and trailers."""
+    eu = str(cateu or "").strip().upper()
+    if eu.startswith("N2") or eu.startswith("N3"):
+        return "hdv"
+    try:
+        return SEGMENT_BY_CAT.get(int(_num(catstc)))
+    except Exception:
+        return None
 
 
 def _norm(s):
@@ -247,11 +261,7 @@ def build(path, snapshot_ym, keep_months=None):
         n_read += 1
         if n_read % 100000 == 0:
             print(f"\r  parsed {n_read:,} rows…", end="")
-        try:
-            cat = int(_num(v.get("CATSTC")))
-        except Exception:
-            continue
-        seg = SEGMENT_BY_CAT.get(cat)
+        seg = segment_of(v.get("CATSTC"), v.get("CATEU"))
         if seg is None:
             continue
         d_lu = _parse_date(v.get("DATCIR_GD"))
@@ -287,7 +297,7 @@ def build(path, snapshot_ym, keep_months=None):
     if keep_months:
         months = months[-keep_months:]
     mset = set(months); months_i = {m: i for i, m in enumerate(months)}
-    segs = ["car", "van", "bus"]; ops = ["new", "import"]
+    segs = SEGMENTS; ops = ["new", "import"]
     brands, b_i = [], {}; models, m_i = [], {}; rows = []
     for (ym, seg, op, brand, model, dtrain), n in counts.items():
         if ym not in mset:
@@ -347,7 +357,7 @@ def merge_append(old, new):
     merged = {k: v for k, v in om.items() if k[0] not in new_months}
     merged.update(nm)
     months = sorted({k[0] for k in merged})
-    segs = ["car", "van", "bus"]; ops = ["new", "import"]
+    segs = SEGMENTS; ops = ["new", "import"]
     mi = {m: i for i, m in enumerate(months)}
     brands, bi = [], {}; models, midx = [], {}; rows = []
     for (ym, seg, op, brand, model, dtr), vals in merged.items():
@@ -386,20 +396,37 @@ def main():
 
     if args.categories:
         from collections import Counter
-        cnt = Counter(); label = {}
+        cateu = Counter(); catstc = Counter(); label = {}; seg_tot = Counter()
         for v in iter_rows(path):
-            c = str(v.get("CATSTC"))
-            cnt[c] += 1
-            if c not in label:
-                label[c] = str(v.get("LIBCAR") or "")
-        print("\n  count   CATSTC  label                                     current segment")
-        print("  " + "-" * 74)
-        for code, n in cnt.most_common(60):
+            eu = str(v.get("CATEU") or "").strip().upper()
+            cs = str(v.get("CATSTC"))
+            cateu[eu] += 1
+            catstc[cs] += 1
+            if cs not in label:
+                label[cs] = str(v.get("LIBCAR") or "")
+            seg_tot[segment_of(v.get("CATSTC"), v.get("CATEU")) or "(skipped)"] += 1
+
+        print("\n=== CATEU — EU vehicle category (drives HDV) ===")
+        print("  M1=car  N1=van  N2/N3=heavy goods(HDV)  M2/M3=bus  L=moto  O=trailer  T=tractor")
+        print("  " + "-" * 58)
+        for k, n in cateu.most_common(50):
+            hdv = " <-- HDV" if (k.startswith("N2") or k.startswith("N3")) else ""
+            print(f"  {n:9d}  {(k or '(blank)'):8}{hdv}")
+
+        print("\n=== CATSTC — national code + bodywork label ===")
+        print("  " + "-" * 58)
+        for k, n in catstc.most_common(60):
             try:
-                seg = SEGMENT_BY_CAT.get(int(float(code)))
+                seg = SEGMENT_BY_CAT.get(int(float(k)))
             except Exception:
                 seg = None
-            print(f"  {n:8d}  {code:>5}  {label[code][:40]:40}  {seg or '(skipped)'}")
+            print(f"  {n:9d}  CATSTC={k:>4}  {label[k][:34]:34}  {seg or '(via CATEU / skipped)'}")
+
+        print("\n=== resulting dashboard segments (what actually gets kept) ===")
+        print("  " + "-" * 58)
+        for k in ["car", "van", "bus", "hdv", "(skipped)"]:
+            if seg_tot.get(k):
+                print(f"  {seg_tot[k]:9d}  {k}")
         return
 
     obj = build(path, snapshot, keep_months=args.months)
