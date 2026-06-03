@@ -99,11 +99,16 @@ def load_master():
             print("· ignoring existing sample data (starting clean).")
             return master, backfilled
         d = o["dims"]
-        # If the segment schema changed (e.g. HDV was added), the existing months
-        # were built without the new segment — force a clean rebuild so every month
-        # gets reprocessed with the new categories instead of being skipped.
+        # If the segment schema OR the data/logic version changed, the existing months
+        # were built with old logic — force a clean rebuild so every month is reprocessed
+        # instead of being skipped.
         if list(d.get("segments", [])) != list(bd.SEGMENTS):
             print(f"· segment schema changed {d.get('segments')} -> {bd.SEGMENTS}; "
+                  "rebuilding all months from scratch.")
+            return master, backfilled
+        if o.get("meta", {}).get("data_version") != bd.DATA_VERSION:
+            print(f"· data_version changed "
+                  f"{o.get('meta', {}).get('data_version')} -> {bd.DATA_VERSION}; "
                   "rebuilding all months from scratch.")
             return master, backfilled
         for r in o["rows"]:
@@ -138,6 +143,7 @@ def write_master(master, snapshot_label, backfilled):
             "generated": dt.date.today().isoformat(),
             "source": "Parc Automobile du Luxembourg (SNCA) via data.public.lu — CC0",
             "source_snapshot": f"backfill→{snapshot_label}",
+            "data_version": bd.DATA_VERSION,
             "latest_month": months[-1] if months else None,
             "backfilled": sorted(backfilled),
             "note": "Each month sourced from the snapshot taken right after it "
