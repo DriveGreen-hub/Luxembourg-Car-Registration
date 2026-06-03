@@ -58,11 +58,7 @@ def aggregate_file(path, wanted_months):
     """Aggregate rows whose DATCIR_GD month is in `wanted_months`."""
     out = defaultdict(lambda: [0, 0, 0])          # key -> [n, co2sum, co2n]
     for v in bd.iter_rows(path):
-        try:
-            cat = int(bd._num(v.get("CATSTC")))
-        except Exception:
-            continue
-        seg = bd.SEGMENT_BY_CAT.get(cat)
+        seg = bd.segment_of(v.get("CATSTC"), v.get("CATEU"))
         if seg is None:
             continue
         d_lu = bd._parse_date(v.get("DATCIR_GD"))
@@ -103,6 +99,13 @@ def load_master():
             print("· ignoring existing sample data (starting clean).")
             return master, backfilled
         d = o["dims"]
+        # If the segment schema changed (e.g. HDV was added), the existing months
+        # were built without the new segment — force a clean rebuild so every month
+        # gets reprocessed with the new categories instead of being skipped.
+        if list(d.get("segments", [])) != list(bd.SEGMENTS):
+            print(f"· segment schema changed {d.get('segments')} -> {bd.SEGMENTS}; "
+                  "rebuilding all months from scratch.")
+            return master, backfilled
         for r in o["rows"]:
             key = (d["months"][r[0]], d["segments"][r[1]], d["operations"][r[2]],
                    d["brands"][r[3]], d["models"][r[4]][0], d["drivetrains"][r[5]])
@@ -117,7 +120,7 @@ def load_master():
 
 def write_master(master, snapshot_label, backfilled):
     months = sorted({k[0] for k in master})
-    segs = ["car", "van", "bus"]; ops = ["new", "import"]
+    segs = bd.SEGMENTS; ops = ["new", "import"]
     mi = {m: i for i, m in enumerate(months)}
     brands, bi = [], {}; models, midx = [], {}; rows = []
     for (ym, seg, op, brand, model, dtr), vals in master.items():
