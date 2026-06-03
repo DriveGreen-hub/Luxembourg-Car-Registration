@@ -12,7 +12,11 @@ on:
         description: "What to run"
         type: choice
         default: "backfill"
-        options: ["backfill", "categories"]
+        options: ["backfill", "categories", "inspect"]
+      month:
+        description: "For inspect mode: snapshot to dump, e.g. 202109"
+        default: "202109"
+        required: false
       chunk:
         description: "How many months (snapshots) to process this run"
         default: "24"
@@ -52,6 +56,10 @@ jobs:
       - name: Inspect vehicle categories (diagnostic only)
         if: github.event.inputs.mode == 'categories'
         run: python build_data.py --categories
+
+      - name: Inspect one snapshot's structure (diagnostic only)
+        if: github.event.inputs.mode == 'inspect'
+        run: python build_data.py --inspect ${{ github.event.inputs.month || '202109' }}
 
       - name: Commit progress
         run: |
