@@ -42,6 +42,11 @@ for c in [71, 72, 73, 74, 75, 76, 89]: SEGMENT_BY_CAT[c] = "bus"
 
 SEGMENTS = ["car", "van", "bus", "hdv"]   # display / storage order
 
+# Bump whenever parsing/classification logic changes in a way that should force a
+# full rebuild of already-processed months (the backfill compares this to the value
+# stored in the data file and starts clean on a mismatch).
+DATA_VERSION = 2
+
 def segment_of(catstc, cateu):
     """car/van/bus come from the validated national code (CATSTC);
     HDV (heavy goods, >3.5t) comes from the EU category N2/N3, which is the
@@ -118,7 +123,11 @@ def classify_operation(codeop, d_first, d_lu):
         return "import"
     if c in ("E", "E1", "H"):
         return None
-    return "new" if d_first >= d_lu else "import"
+    # No authoritative code — older snapshots often leave CODEOP blank or numeric.
+    # Treat as an import only when there is a REAL prior-registration gap: a brand-new
+    # car has first-ever registration == first-LU registration, but processing lag can
+    # leave a few days between them, which must not be mistaken for a foreign history.
+    return "import" if (d_lu - d_first).days > 31 else "new"
 
 
 def _num(x):
@@ -317,6 +326,7 @@ def build(path, snapshot_ym, keep_months=None):
             "generated": dt.date.today().isoformat(),
             "source": "Parc Automobile du Luxembourg (SNCA) via data.public.lu — CC0",
             "source_snapshot": snapshot_ym,
+            "data_version": DATA_VERSION,
             "latest_month": months[-1] if months else None,
             "note": "Brand-new = first LU registration equals first-ever registration. "
                     "Import = vehicle previously registered abroad. Older months are "
