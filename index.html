@@ -64,6 +64,19 @@
      font-family:var(--body);font-size:13.5px;font-weight:600;padding:9px 13px;border-radius:10px;width:100%;box-sizing:border-box}
   input[list]:focus{outline:none;border-color:var(--accent)}
   input[list]::placeholder{color:var(--dim);font-weight:500}
+  .combo{position:relative}
+  .combo input{appearance:none;background:var(--panel);border:1px solid var(--line);color:var(--txt);
+     font-family:var(--body);font-size:13.5px;font-weight:600;padding:9px 13px;border-radius:10px;width:100%;box-sizing:border-box}
+  .combo input:focus{outline:none;border-color:var(--accent)}
+  .combo input::placeholder{color:var(--dim);font-weight:500}
+  .combo-list{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:40;background:var(--panel);
+     border:1px solid var(--line2);border-radius:10px;max-height:260px;overflow:auto;display:none;
+     box-shadow:0 10px 30px rgba(0,0,0,.5);-webkit-overflow-scrolling:touch}
+  .combo-list.show{display:block}
+  .combo-opt{padding:10px 13px;font-size:13.5px;color:var(--mut);cursor:pointer;font-family:var(--body);border-bottom:1px solid var(--line)}
+  .combo-opt:last-child{border-bottom:0}
+  .combo-opt.active,.combo-opt:hover{background:var(--line);color:var(--txt)}
+  .combo-opt.clear{color:var(--accent);font-weight:600}
   .chips{display:flex;flex-wrap:wrap;gap:6px}
   .chip{font-family:var(--mono);font-size:11.5px;font-weight:500;padding:6px 11px;border-radius:20px;cursor:pointer;
      border:1px solid var(--line);background:var(--panel);color:var(--mut);transition:.15s;display:flex;align-items:center;gap:6px}
@@ -100,7 +113,7 @@
 
   svg{display:block;width:100%;overflow:visible}
   .bar-row{font-family:var(--body)}
-  .axis text{font-family:var(--mono);font-size:11px;fill:#aebdc9}
+  .axis text{font-family:var(--mono);font-size:11px;fill:#eaf0f5}
   .gridline{stroke:var(--line);stroke-width:1}
   .hover-tip{position:fixed;pointer-events:none;background:#05080b;border:1px solid var(--line2);border-radius:9px;
      padding:8px 11px;font-family:var(--mono);font-size:11.5px;color:var(--txt);z-index:50;opacity:0;transition:opacity .1s;
@@ -181,13 +194,17 @@
     </div>
     <div class="ctl">
       <label>Brand</label>
-      <input id="brandSel" list="brandList" placeholder="All brands — type to search" autocomplete="off" spellcheck="false">
-      <datalist id="brandList"></datalist>
+      <div class="combo" id="brandCombo">
+        <input id="brandSel" placeholder="All brands — tap to search" autocomplete="off" spellcheck="false">
+        <div class="combo-list" id="brandOpts"></div>
+      </div>
     </div>
     <div class="ctl">
       <label>Model focus</label>
-      <input id="modelFocus" list="modelList" placeholder="Auto · type to search" autocomplete="off" spellcheck="false">
-      <datalist id="modelList"></datalist>
+      <div class="combo" id="modelCombo">
+        <input id="modelFocus" placeholder="Auto · tap to search" autocomplete="off" spellcheck="false">
+        <div class="combo-list" id="modelOpts"></div>
+      </div>
     </div>
     <div class="ctl" style="flex:1;min-width:230px">
       <label>Drivetrain</label>
@@ -315,7 +332,7 @@ async function boot(){
 
 /* ============================ state ============================ */
 const ST = {seg:'car', op:'new', month:null, period:'month', brand:'', model:'', dt:new Set(['BEV','PHEV','HEV','Petrol','Diesel','Other'])};
-let BRAND_SET=new Set(), MODEL_BY_LABEL={};
+let BRAND_SET=new Set(), MODEL_BY_LABEL={}, BRANDS_SORTED=[], MODEL_LABELS=[];
 
 function init(){
   const D=DATA.dims;
@@ -325,10 +342,9 @@ function init(){
   const msel=$('#monthSel');
   D.months.forEach(m=>{const o=document.createElement('option');o.value=m;o.textContent=labelMonth(m);msel.appendChild(o);});
   ST.month = D.months[D.months.length-1]; msel.value=ST.month;
-  // brand search (input + datalist)
-  const blist=$('#brandList');
+  // brand search (custom combobox — works on iOS where datalist doesn't)
   BRAND_SET=new Set(D.brands);
-  blist.innerHTML=D.brands.slice().sort().map(b=>`<option value="${b}"></option>`).join('');
+  BRANDS_SORTED=D.brands.slice().sort((a,b)=>a.localeCompare(b));
   // drivetrain chips
   const dc=$('#dtChips');
   D.drivetrains.forEach(dt=>{
@@ -342,12 +358,14 @@ function init(){
   bindSeg('#segSel','seg'); bindSeg('#opSel','op');
   msel.onchange=e=>{ST.month=e.target.value;render();};
   $('#periodSel').onchange=e=>{ST.period=e.target.value;render();};
-  $('#brandSel').onchange=e=>{const v=e.target.value.trim();
-    ST.brand=BRAND_SET.has(v)?v:''; if(!ST.brand)e.target.value='';
-    ST.model='';$('#modelFocus').value='';populateModels();render();};
-  $('#modelFocus').onchange=e=>{const v=e.target.value.trim();
-    ST.model=(v in MODEL_BY_LABEL)?String(MODEL_BY_LABEL[v]):''; if(!ST.model)e.target.value='';
-    render();};
+  // Brand combobox
+  makeCombo('#brandSel','#brandOpts',
+    ()=>BRANDS_SORTED,
+    {clearLabel:'All brands', onPick:v=>{ST.brand=v;ST.model='';$('#modelFocus').value='';populateModels();render();}});
+  // Model combobox
+  makeCombo('#modelFocus','#modelOpts',
+    ()=>MODEL_LABELS,
+    {clearLabel:'Auto · top model', onPick:lab=>{ST.model=(lab in MODEL_BY_LABEL)?String(MODEL_BY_LABEL[lab]):'';render();}});
   $('#csvBtn').onclick=exportCSV;
   $('#pngBtn').onclick=exportPNG;
   populateModels();
@@ -363,11 +381,49 @@ function populateModels(){
     vol[r[4]]=(vol[r[4]]||0)+r[6];
   }
   const ids=Object.keys(vol).map(Number).sort((a,b)=>vol[b]-vol[a]);
-  MODEL_BY_LABEL={};
-  const opts=ids.map(i=>{const m=D.models[i];const lab=`${D.brands[m[1]]} ${m[0]}`;
-    MODEL_BY_LABEL[lab]=i;return `<option value="${lab.replace(/"/g,'&quot;')}"></option>`;});
-  $('#modelList').innerHTML=opts.join('');
+  MODEL_BY_LABEL={}; MODEL_LABELS=[];
+  ids.forEach(i=>{const m=D.models[i];const lab=`${D.brands[m[1]]} ${m[0]}`;
+    MODEL_BY_LABEL[lab]=i; MODEL_LABELS.push(lab);});
   if(ST.model!==''&&!ids.includes(Number(ST.model))){ST.model='';$('#modelFocus').value='';}
+}
+
+/* lightweight searchable dropdown that works on mobile (iOS Safari ignores <datalist>) */
+function makeCombo(inputSel, listSel, getItems, opts={}){
+  const inp=$(inputSel), list=$(listSel);
+  let active=-1, shown=[];
+  function build(){
+    const q=inp.value.trim().toLowerCase();
+    let items=getItems();
+    if(q) items=items.filter(s=>s.toLowerCase().includes(q));
+    shown=items.slice(0,80);
+    let h='';
+    if(opts.clearLabel) h+=`<div class="combo-opt clear" data-i="-1">${opts.clearLabel}</div>`;
+    h+=shown.map((s,i)=>`<div class="combo-opt" data-i="${i}">${s.replace(/</g,'&lt;')}</div>`).join('');
+    list.innerHTML=h||`<div class="combo-opt" style="color:var(--dim)">No match</div>`;
+    list.classList.add('show'); active=-1;
+    list.querySelectorAll('.combo-opt').forEach(el=>{
+      el.onmousedown=ev=>{ev.preventDefault();
+        const idx=Number(el.dataset.i);
+        if(idx<0){inp.value='';opts.onPick('');}
+        else{inp.value=shown[idx];opts.onPick(shown[idx]);}
+        hide();};
+    });
+  }
+  function hide(){list.classList.remove('show');}
+  inp.addEventListener('focus',build);
+  inp.addEventListener('input',build);
+  inp.addEventListener('blur',()=>setTimeout(hide,150));
+  inp.addEventListener('keydown',e=>{
+    const o=list.querySelectorAll('.combo-opt'); if(!list.classList.contains('show'))return;
+    if(e.key==='ArrowDown'){active=Math.min(active+1,o.length-1);}
+    else if(e.key==='ArrowUp'){active=Math.max(active-1,0);}
+    else if(e.key==='Enter'){if(active>=0)o[active].onmousedown(e);hide();return;}
+    else if(e.key==='Escape'){hide();return;}
+    else return;
+    o.forEach((el,i)=>el.classList.toggle('active',i===active));
+    if(o[active])o[active].scrollIntoView({block:'nearest'});
+    e.preventDefault();
+  });
 }
 function bindSeg(sel,key){
   document.querySelectorAll(sel+' button').forEach(b=>{
