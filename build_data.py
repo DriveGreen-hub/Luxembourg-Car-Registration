@@ -45,19 +45,29 @@ SEGMENTS = ["car", "van", "bus", "hdv"]   # display / storage order
 # Bump whenever parsing/classification logic changes in a way that should force a
 # full rebuild of already-processed months (the backfill compares this to the value
 # stored in the data file and starts clean on a mismatch).
-DATA_VERSION = 3
+DATA_VERSION = 4
 
 def segment_of(catstc, cateu):
-    """car/van/bus come from the validated national code (CATSTC);
-    HDV (heavy goods, >3.5t) comes from the EU category N2/N3, which is the
-    only field that cleanly separates heavy trucks from vans and trailers."""
+    """Segment off the EU category (CATEU), which is stable across all years.
+    The national code (CATSTC) is NOT usable historically because SNCA renumbered
+    it (passenger cars are code 1 in recent files but code 6 in older ones), whereas
+    the EU category is consistent:
+        M1 (incl. M1G) -> car   (passenger car; matches the validated CATSTC=1 count)
+        N1             -> van   (light goods, up to 3.5 t)
+        N2 / N3        -> hdv   (heavy goods, over 3.5 t)
+        M2 / M3        -> bus   (minibus / bus / coach)
+    Everything else (L = motorcycles, O = trailers, T = tractors, blank) is skipped.
+    """
     eu = str(cateu or "").strip().upper()
+    if eu.startswith("M1"):
+        return "car"
+    if eu.startswith("N1"):
+        return "van"
     if eu.startswith("N2") or eu.startswith("N3"):
         return "hdv"
-    try:
-        return SEGMENT_BY_CAT.get(int(_num(catstc)))
-    except Exception:
-        return None
+    if eu.startswith("M2") or eu.startswith("M3"):
+        return "bus"
+    return None
 
 
 def _norm(s):
@@ -148,7 +158,12 @@ def _parse_date(x):
     # ship date columns as bare numbers when the cell lost its date formatting.
     if isinstance(x, (int, float)) and not isinstance(x, bool):
         n = int(x)
-        if 20000 <= n <= 80000:                # ~1954 .. ~2089, sane reg-date range
+        if 19000101 <= n <= 21001231:          # YYYYMMDD integer (old SNCA format)
+            try:
+                return dt.date(n // 10000, (n // 100) % 100, n % 100)
+            except Exception:
+                return None
+        if 20000 <= n <= 80000:                # Excel serial (days since 1899-12-30)
             try:
                 return dt.date(1899, 12, 30) + dt.timedelta(days=n)
             except Exception:
