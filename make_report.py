@@ -50,7 +50,7 @@ def main():
     a = ap.parse_args()
 
     d, D, M, R, S, O, DT, BR, MO = load(a.data)
-    month = a.month or D["meta"].get("latest_month") or M[-1]
+    month = a.month or d["meta"].get("latest_month") or M[-1]
     if month and "-" not in month and len(month) == 6:
         month = month[:4] + "-" + month[4:]   # 202606 -> 2026-06
     if month not in M:
