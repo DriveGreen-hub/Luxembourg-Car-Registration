@@ -370,6 +370,7 @@ const fmt = n => n.toLocaleString('en-US');
 const $ = s => document.querySelector(s);
 
 let DATA=null;
+const BUILD='2026-09-24c';   // bump on each frontend change so the live version is verifiable
 
 async function boot(){
   try{
@@ -394,7 +395,7 @@ let CMP_ITEMS=[], CMP_LOOKUP={};
 function init(){
   const D=DATA.dims;
   // latest box
-  $('#latestBox').innerHTML = `latest snapshot · <b>${DATA.meta.latest_month}</b><br>generated ${DATA.meta.generated}`;
+  $('#latestBox').innerHTML = `latest snapshot · <b>${DATA.meta.latest_month}</b><br>generated ${DATA.meta.generated} · build ${BUILD}`;
   // month dropdown
   const msel=$('#monthSel');
   D.months.forEach(m=>{const o=document.createElement('option');o.value=m;o.textContent=labelMonth(m);msel.appendChild(o);});
