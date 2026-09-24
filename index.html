@@ -84,6 +84,21 @@
   .chip.on{color:var(--txt);border-color:var(--line2);background:var(--panel2)}
   .chip.off{opacity:.4;text-decoration:line-through}
   .spacer{flex:1}
+  /* ---------- compare bar ---------- */
+  .compare-bar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:0 0 22px;
+     padding:14px 16px;background:linear-gradient(180deg,var(--panel),var(--bg2));
+     border:1px solid var(--line);border-radius:var(--r)}
+  .compare-bar > label{font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;color:var(--accent);font-weight:700;font-family:var(--mono)}
+  .compare-bar .combo{min-width:260px;flex:0 0 auto}
+  .cmp-chips{display:flex;flex-wrap:wrap;gap:7px;flex:1}
+  .cmp-chip{display:inline-flex;align-items:center;gap:8px;font-family:var(--body);font-size:12.5px;font-weight:600;
+     padding:6px 8px 6px 11px;border-radius:9px;background:var(--panel2);border:1px solid var(--line2);color:var(--txt)}
+  .cmp-chip .sw{width:10px;height:10px;border-radius:50%;flex:none}
+  .cmp-chip .rm{cursor:pointer;color:var(--dim);font-family:var(--mono);font-size:15px;line-height:1;padding:0 3px;border-radius:4px}
+  .cmp-chip .rm:hover{color:var(--down);background:#ffffff10}
+  .cmp-hint{font-family:var(--mono);font-size:11px;color:var(--dim)}
+  .cmp-tbl td.series{font-family:var(--body);color:var(--txt);font-weight:600}
+  .cmp-tbl .sw{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;vertical-align:middle}
   .btn{appearance:none;border:1px solid var(--line2);background:var(--panel);color:var(--mut);font-family:var(--mono);
      font-size:11.5px;font-weight:500;padding:9px 13px;border-radius:10px;cursor:pointer;transition:.15s;letter-spacing:.03em}
   .btn:hover{color:var(--txt);border-color:var(--accent);box-shadow:0 0 0 1px #39d6c833}
@@ -212,6 +227,16 @@
     </div>
   </div>
 
+  <!-- ===== compare bar ===== -->
+  <div class="compare-bar">
+    <label>Compare</label>
+    <div class="combo" id="cmpCombo">
+      <input id="cmpInput" placeholder="Add a brand or model to compare…" autocomplete="off" spellcheck="false">
+      <div class="combo-list" id="cmpOpts"></div>
+    </div>
+    <div class="cmp-chips" id="cmpChips"><span class="cmp-hint">Add up to 4 brands or models to overlay them on the trend &amp; BEV-share charts.</span></div>
+  </div>
+
   <!-- ===== KPIs ===== -->
   <div class="kpis" id="kpis"></div>
 
@@ -235,6 +260,35 @@
     <div class="legend">
       <span><i style="background:var(--bev)"></i>BEV share %</span>
       <span><i style="background:var(--accent2)"></i>3-month average</span>
+    </div>
+  </div>
+
+  <!-- ===== comparison table (only when compare active) ===== -->
+  <div class="panel" id="cmpPanel" style="display:none;margin-bottom:16px">
+    <div class="ph"><h3>Comparison</h3><div class="meta" id="cmpMeta"></div></div>
+    <div style="overflow:auto"><table id="cmpTbl" class="cmp-tbl"></table></div>
+  </div>
+
+  <!-- ===== 100% powertrain mix over time ===== -->
+  <div class="panel" style="margin-bottom:16px">
+    <div class="ph">
+      <div><h3 id="powTitle">Powertrain mix over time</h3></div>
+      <div class="meta">share of registrations · each month = 100%</div>
+    </div>
+    <div id="powChart"></div>
+    <div class="legend" id="powLegend"></div>
+  </div>
+
+  <!-- ===== seasonality + movers ===== -->
+  <div class="grid g-2b" style="margin-bottom:16px">
+    <div class="panel">
+      <div class="ph"><h3 id="seasonTitle">Year-over-year seasonality</h3><div class="meta" id="seasonMeta"></div></div>
+      <div id="seasonChart"></div>
+      <div class="legend" id="seasonLegend"></div>
+    </div>
+    <div class="panel">
+      <div class="ph"><h3 id="moversTitle">Market share &amp; movers</h3><div class="meta" id="moversMeta"></div></div>
+      <div id="moversChart"></div>
     </div>
   </div>
 
@@ -331,8 +385,11 @@ async function boot(){
 }
 
 /* ============================ state ============================ */
-const ST = {seg:'car', op:'new', month:null, period:'month', brand:'', model:'', dt:new Set(['BEV','PHEV','HEV','Petrol','Diesel','Other'])};
+const ST = {seg:'car', op:'new', month:null, period:'month', brand:'', model:'', dt:new Set(['BEV','PHEV','HEV','Petrol','Diesel','Other']), compare:[]};
 let BRAND_SET=new Set(), MODEL_BY_LABEL={}, BRANDS_SORTED=[], MODEL_LABELS=[];
+// compare: independent full lookup of every brand + model, and a colour palette
+const CMP_COLORS=['#5ad1c8','#ffb347','#6c8cff','#ff6b9d'];
+let CMP_ITEMS=[], CMP_LOOKUP={};
 
 function init(){
   const D=DATA.dims;
@@ -368,8 +425,53 @@ function init(){
     {clearLabel:'Auto · top model', onPick:lab=>{ST.model=(lab in MODEL_BY_LABEL)?String(MODEL_BY_LABEL[lab]):'';render();}});
   $('#csvBtn').onclick=exportCSV;
   $('#pngBtn').onclick=exportPNG;
+  // ---- compare: build a full brand+model search list (independent of filters) ----
+  buildCompareIndex();
+  makeCombo('#cmpInput','#cmpOpts', ()=>CMP_ITEMS, {onPick:lab=>{
+    const it=CMP_LOOKUP[lab]; if(it)addCompare(it); $('#cmpInput').value='';
+  }});
+  renderCmpChips();
   populateModels();
   render();
+}
+
+function buildCompareIndex(){
+  const D=DATA.dims;
+  // model volumes across all rows, to order the list by popularity
+  const mv={};
+  for(const r of DATA.rows) mv[r[4]]=(mv[r[4]]||0)+r[6];
+  const brandItems=D.brands.slice().sort((a,b)=>a.localeCompare(b))
+    .map(b=>({label:b, type:'brand', key:b}));
+  const modelIds=Object.keys(mv).map(Number).sort((a,b)=>mv[b]-mv[a]);
+  const modelItems=modelIds.map(i=>{const m=D.models[i];
+    return {label:`${D.brands[m[1]]} ${m[0]}`, type:'model', key:i};});
+  CMP_LOOKUP={};
+  CMP_ITEMS=[];
+  // brands first, then models; de-dup labels (a model label can't collide with a bare brand)
+  [...brandItems,...modelItems].forEach(it=>{
+    if(CMP_LOOKUP[it.label])return; CMP_LOOKUP[it.label]=it; CMP_ITEMS.push(it.label);
+  });
+}
+
+function addCompare(it){
+  if(ST.compare.length>=4)return;
+  if(ST.compare.some(c=>c.type===it.type&&String(c.key)===String(it.key)))return;
+  const used=new Set(ST.compare.map(c=>c.color));
+  const color=CMP_COLORS.find(c=>!used.has(c))||CMP_COLORS[ST.compare.length%CMP_COLORS.length];
+  ST.compare.push({type:it.type,key:it.key,label:it.label,color});
+  renderCmpChips(); render();
+}
+function removeCompare(i){ST.compare.splice(i,1);renderCmpChips();render();}
+function renderCmpChips(){
+  const el=$('#cmpChips');
+  if(!ST.compare.length){
+    el.innerHTML='<span class="cmp-hint">Add up to 4 brands or models to overlay them on the trend &amp; BEV-share charts.</span>';
+    return;
+  }
+  el.innerHTML=ST.compare.map((c,i)=>
+    `<span class="cmp-chip"><span class="sw" style="background:${c.color}"></span>${esc(c.label)}`+
+    `<span class="rm" onclick="removeCompare(${i})" title="remove">×</span></span>`).join('')
+    + (ST.compare.length<4?'':'<span class="cmp-hint">max 4</span>');
 }
 
 function populateModels(){
@@ -452,6 +554,47 @@ function monthsInPeriod(){
 }
 function totalFor(rows,monthSet){let t=0;const S=new Set(monthSet);for(const r of rows){if(S.has(DATA.dims.months[r[0]]))t+=r[6];}return t;}
 
+/* ---------- compare helpers (respect seg + op; ignore the drivetrain chips) ---------- */
+function cmpMatch(item,r){
+  return item.type==='brand' ? DATA.dims.brands[r[3]]===item.key : r[4]===Number(item.key);
+}
+function cmpMonthly(item){
+  const D=DATA.dims, M=D.months, vol=M.map(()=>0), bev=M.map(()=>0);
+  for(const r of DATA.rows){
+    if(!segMatch(r[1])||!opMatch(r[2]))continue;
+    if(!cmpMatch(item,r))continue;
+    vol[r[0]]+=r[6]; if(D.drivetrains[r[5]]==='BEV')bev[r[0]]+=r[6];
+  }
+  return {vol,bev};
+}
+// shared multi-line renderer for the compare overlays
+function multiLine(elId, series, period, opts={}){
+  // series: [{name,color,values:[per month, null-able]}]
+  const M=DATA.dims.months, n=M.length;
+  const W=920,H=opts.H||260,PL=44,PR=14,PT=14,PB=26, iw=W-PL-PR, ih=H-PT-PB;
+  const all=[].concat(...series.map(s=>s.values.filter(v=>v!=null)));
+  const ymax=Math.max(opts.min||1,...all)*1.14;
+  const x=i=>PL+(n<=1?iw/2:i/(n-1)*iw), y=v=>PT+ih-(v/ymax)*ih;
+  const fmtY=opts.pct?(v=>Math.round(v)+'%'):(v=>fmt(Math.round(v)));
+  let svg=`<svg viewBox="0 0 ${W} ${H}">`;
+  for(let g=0;g<=4;g++){const gy=PT+ih-(g/4)*ih;
+    svg+=`<line class="gridline" x1="${PL}" y1="${gy}" x2="${W-PR}" y2="${gy}"/>`;
+    svg+=`<text class="axis" x="${PL-7}" y="${gy+3}" text-anchor="end">${fmtY(ymax*g/4)}</text>`;}
+  if(period&&period.length){const xs=x(M.indexOf(period[0])),xe=x(M.indexOf(period[period.length-1]));
+    svg+=`<rect x="${xs-3}" y="${PT}" width="${Math.max(6,xe-xs)+6}" height="${ih}" fill="none" stroke="${css('--accent2')}" stroke-dasharray="3 3" stroke-width="1.1" rx="4"/>`;}
+  // year ticks
+  let ly=null;M.forEach((m,i)=>{const yy=m.slice(0,4);if(yy!==ly){ly=yy;
+    svg+=`<text class="axis" x="${x(i)}" y="${H-8}" text-anchor="middle">${yy}</text>`;}});
+  const path=vals=>{let d='',st=false;vals.forEach((v,i)=>{if(v==null){st=false;return;}d+=(st?'L':'M')+x(i).toFixed(1)+','+y(v).toFixed(1)+' ';st=true;});return d;};
+  series.forEach(s=>{svg+=`<path d="${path(s.values)}" fill="none" stroke="${s.color}" stroke-width="2.2" stroke-linejoin="round"/>`;});
+  // hover: nearest month, all series
+  M.forEach((m,i)=>{const hw=iw/Math.max(1,n-1);
+    const body=series.map(s=>s.values[i]==null?null:`<span style="color:${s.color}">${esc(s.name)}</span> ${opts.pct?s.values[i].toFixed(1)+'%':fmt(s.values[i])}`).filter(Boolean).join('<br>');
+    if(body)svg+=`<rect x="${x(i)-hw/2}" y="${PT}" width="${hw}" height="${ih}" fill="transparent" onmousemove="showTip(event,'<b>${labelMonth(m)}</b><br>${body}')" onmouseleave="hideTip()"/>`;});
+  svg+='</svg>';
+  $(elId).innerHTML=svg;
+}
+
 /* ============================ render ============================ */
 function render(){
   const D=DATA.dims, rows=rowsFiltered();
@@ -470,15 +613,29 @@ function render(){
   drawSplit(period);
   drawImports(period);
   drawTable(rows,period);
+  drawPowertrain(period);
+  drawSeasonality(rowsSel);
+  drawMovers(period);
+  // compare table (shown only when there are series to compare)
+  $('#cmpPanel').style.display = ST.compare.length ? '' : 'none';
+  if(ST.compare.length) drawCompareTable(period);
   // titles
   const segL={car:'passenger cars',van:'vans',bus:'buses',hdv:'HDV / heavy trucks',all:'all vehicles'}[ST.seg];
   const opL={new:'brand-new',import:'used imports',both:'new + import'}[ST.op];
   const perL={month:labelMonth(ST.month),ytd:`YTD ${ST.month.slice(0,4)}`,r12:'last 12 months',all:'full history'}[ST.period];
   let selL = ST.brand||'all brands';
   if(ST.model!==''){const m=D.models[Number(ST.model)];selL=`${D.brands[m[1]]} ${m[0]}`;}
-  $('#trendTitle').textContent=`Monthly ${opL} ${selL==='all brands'?segL:selL}`;
-  $('#trendMeta').textContent=`${selL} · highlighting ${perL}`;
+  if(ST.compare.length){
+    $('#trendTitle').textContent=`Monthly ${opL} ${segL} · comparison`;
+    $('#trendMeta').textContent=`${ST.compare.length} series · highlighting ${perL}`;
+  }else{
+    $('#trendTitle').textContent=`Monthly ${opL} ${selL==='all brands'?segL:selL}`;
+    $('#trendMeta').textContent=`${selL} · highlighting ${perL}`;
+  }
   $('#tableTitle').textContent=`Breakdown · ${opL} ${segL} · ${perL}`;
+  $('#powTitle').textContent=`Powertrain mix over time · ${selL==='all brands'?segL:selL}`;
+  $('#seasonTitle').textContent=`Year-over-year seasonality · ${opL} ${selL==='all brands'?segL:selL}`;
+  $('#moversTitle').textContent=`Market share & movers · ${segL}`;
   const meta=`${perL} · ${fmt(totalFor(rows,period))} units`;
   $('#brandMeta').textContent=meta; $('#modelMeta').textContent=meta; $('#mixMeta').textContent=perL;
 }
@@ -531,8 +688,15 @@ function card(lab,val,sub,raw){
   return `<div class="kpi"><div class="k-lab">${lab}</div><div class="k-val">${val}</div><div class="k-sub">${sub}</div></div>`;
 }
 
-/* ---------- trend: stacked area by drivetrain ---------- */
+/* ---------- trend: stacked area by drivetrain (or multi-line when comparing) ---------- */
 function drawTrend(rows,period){
+  if(ST.compare.length){
+    const series=ST.compare.map(c=>({name:c.label,color:c.color,values:cmpMonthly(c).vol}));
+    multiLine('#trendChart',series,period,{H:300});
+    $('#trendLegend').innerHTML=ST.compare.map(c=>`<span><i style="background:${c.color}"></i>${esc(c.label)}</span>`).join('')
+      +`<span class="cmp-hint">monthly ${ {new:'brand-new',import:'used-import',both:'new + import'}[ST.op] } registrations · ${ {car:'cars',van:'vans',bus:'buses',hdv:'HDV',all:'all'}[ST.seg] }</span>`;
+    return;
+  }
   const M=DATA.dims.months, DTs=DATA.dims.drivetrains.filter(d=>ST.dt.has(d));
   const W=920,H=300,PL=44,PR=12,PT=14,PB=26, iw=W-PL-PR, ih=H-PT-PB;
   // matrix month x dt
@@ -630,8 +794,22 @@ function drawLine(elId, labels, values, period, opts={}){
   $(elId).innerHTML=svg;
 }
 
-/* ---------- BEV adoption % over time (wide, dual line) ---------- */
+/* ---------- BEV adoption % over time (wide, dual line — or per-series when comparing) ---------- */
 function drawAdoption(period){
+  if(ST.compare.length){
+    const M=DATA.dims.months;
+    const series=ST.compare.map(c=>{const s=cmpMonthly(c);
+      return {name:c.label,color:c.color,values:M.map((_,i)=>s.vol[i]>0?s.bev[i]/s.vol[i]*100:null)};});
+    multiLine('#adoptChart',series,period,{H:240,pct:true,min:10});
+    $('#adoptTitle').textContent='BEV share over time · comparison';
+    // period share per series for the meta line
+    const PS=new Set(period);
+    const bits=ST.compare.map((c,k)=>{const s=cmpMonthly(c);let b=0,t=0;
+      M.forEach((m,i)=>{if(PS.has(m)){b+=s.bev[i];t+=s.vol[i];}});
+      return `<span style="color:${c.color}">${esc(c.label)} ${t?(b/t*100).toFixed(1):'0'}%</span>`;}).join(' · ');
+    $('#adoptMeta').innerHTML=bits;
+    return;
+  }
   const D=DATA.dims, M=D.months;
   const bev=M.map(()=>0), tot=M.map(()=>0);
   for(const r of DATA.rows){
@@ -845,6 +1023,149 @@ function drawTable(rows,period){
   $('#tbl').innerHTML=h;
 }
 function sortTbl(col){if(tblSort.col===col)tblSort.dir*=-1;else{tblSort.col=col;tblSort.dir=(col==='brand'||col==='model')?1:-1;}render();}
+
+/* ---------- comparison stats table ---------- */
+function drawCompareTable(period){
+  const M=DATA.dims.months, PS=new Set(period), idx=M.indexOf(ST.month);
+  const ytdMonths=M.filter(m=>m.slice(0,4)===ST.month.slice(0,4)&&m<=ST.month);
+  // segment total in the period (for share-of-segment), respecting seg/op only
+  let segTot=0;
+  for(const r of DATA.rows){if(PS.has(M[r[0]])&&segMatch(r[1])&&opMatch(r[2]))segTot+=r[6];}
+  const perL={month:labelMonth(ST.month),ytd:`YTD ${ST.month.slice(0,4)}`,r12:'last 12 mo',all:'all-time'}[ST.period];
+  $('#cmpMeta').textContent=`${perL} · ${ {new:'brand-new',import:'used import',both:'new + import'}[ST.op] } · ${ {car:'passenger cars',van:'vans',bus:'buses',hdv:'HDV',all:'all vehicles'}[ST.seg] }`;
+  let h='<thead><tr><th>Series</th><th>Period vol</th><th>BEV share</th><th>YTD vol</th><th>MoM</th><th>Share of segment</th></tr></thead><tbody>';
+  for(const c of ST.compare){
+    const s=cmpMonthly(c);
+    let pv=0,pb=0; M.forEach((m,i)=>{if(PS.has(m)){pv+=s.vol[i];pb+=s.bev[i];}});
+    const ytd=ytdMonths.reduce((t,m)=>t+s.vol[M.indexOf(m)],0);
+    const cur=s.vol[idx]||0, prev=idx>0?(s.vol[idx-1]||0):0;
+    const mom=prev?((cur-prev)/prev*100):null;
+    const bevSh=pv?(pb/pv*100):0;
+    const segSh=segTot?(pv/segTot*100):0;
+    h+=`<tr><td class="series"><span class="sw" style="background:${c.color}"></span>${esc(c.label)}</td>`+
+       `<td>${fmt(pv)}</td><td>${bevSh.toFixed(1)}%</td><td>${fmt(ytd)}</td>`+
+       `<td>${mom==null?'—':deltaHTML(mom)}</td><td>${segSh.toFixed(1)}%</td></tr>`;
+  }
+  h+='</tbody>';
+  $('#cmpTbl').innerHTML=h;
+}
+
+/* ---------- 100% powertrain mix over time (normalised stacked area) ---------- */
+function drawPowertrain(period){
+  const D=DATA.dims, M=D.months;
+  // per-month per-drivetrain counts (respect seg/op/brand/model; ignore the dt chips so the full mix shows)
+  const mat=M.map(()=>({}));
+  for(const r of DATA.rows){
+    if(!segMatch(r[1])||!opMatch(r[2]))continue;
+    if(ST.brand!==''&&D.brands[r[3]]!==ST.brand)continue;
+    if(ST.model!==''&&r[4]!==Number(ST.model))continue;
+    const dt=D.drivetrains[r[5]];mat[r[0]][dt]=(mat[r[0]][dt]||0)+r[6];
+  }
+  const tot=M.map((_,i)=>Object.values(mat[i]).reduce((a,b)=>a+b,0));
+  // stack order bottom→top: combustion at the base, electrified on top
+  const order=['Diesel','Petrol','Other','HEV','PHEV','BEV'];
+  const W=920,H=260,PL=40,PR=14,PT=12,PB=26, iw=W-PL-PR, ih=H-PT-PB;
+  const x=i=>PL+(M.length<=1?iw/2:i/(M.length-1)*iw), y=f=>PT+ih-f*ih;
+  let svg=`<svg viewBox="0 0 ${W} ${H}">`;
+  for(let g=0;g<=4;g++){const gy=PT+ih-(g/4)*ih;
+    svg+=`<line class="gridline" x1="${PL}" y1="${gy}" x2="${W-PR}" y2="${gy}"/>`;
+    svg+=`<text class="axis" x="${PL-7}" y="${gy+3}" text-anchor="end">${g*25}%</text>`;}
+  const base=M.map(()=>0);
+  order.forEach(dt=>{
+    let top=[],bot=[];
+    for(let i=0;i<M.length;i++){const f=tot[i]?(mat[i][dt]||0)/tot[i]:0;
+      const b=base[i], t=b+f; bot.push([x(i),y(b)]); top.push([x(i),y(t)]); base[i]=t;}
+    const d=top.map((p,i)=>`${i?'L':'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ')
+      +' '+bot.reverse().map(p=>`L${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ')+'Z';
+    svg+=`<path d="${d}" fill="${css(DT_COLORS[dt])}" fill-opacity="0.85"/>`;
+  });
+  // period highlight
+  const xs=x(M.indexOf(period[0])),xe=x(M.indexOf(period[period.length-1]));
+  svg+=`<rect x="${xs-3}" y="${PT}" width="${Math.max(6,xe-xs)+6}" height="${ih}" fill="none" stroke="#fff" stroke-opacity=".5" stroke-dasharray="3 3" stroke-width="1.1" rx="4"/>`;
+  let ly=null;M.forEach((m,i)=>{const yy=m.slice(0,4);if(yy!==ly){ly=yy;
+    svg+=`<text class="axis" x="${x(i)}" y="${H-8}" text-anchor="middle">${yy}</text>`;}});
+  M.forEach((m,i)=>{const hw=iw/Math.max(1,M.length-1);if(!tot[i])return;
+    const body=order.slice().reverse().filter(dt=>mat[i][dt]).map(dt=>`<span style="color:${css(DT_COLORS[dt])}">${dt}</span> ${((mat[i][dt]||0)/tot[i]*100).toFixed(1)}%`).join('<br>');
+    svg+=`<rect x="${x(i)-hw/2}" y="${PT}" width="${hw}" height="${ih}" fill="transparent" onmousemove="showTip(event,'<b>${labelMonth(m)}</b> · ${fmt(tot[i])} units<br>${body}')" onmouseleave="hideTip()"/>`;});
+  svg+='</svg>';
+  $('#powChart').innerHTML=svg;
+  $('#powLegend').innerHTML=order.slice().reverse().map(d=>`<span><i style="background:${css(DT_COLORS[d])}"></i>${d}</span>`).join('');
+}
+
+/* ---------- year-over-year seasonality (line per year, Jan..Dec) ---------- */
+function drawSeasonality(rows){
+  const D=DATA.dims, M=D.months;
+  // monthly totals of the current selection, grouped by year → 12 values each
+  const byYear={};
+  const S=new Set(); // years present
+  for(const r of rows){const ym=M[r[0]];const y=ym.slice(0,4),mo=+ym.slice(5,7);
+    (byYear[y]=byYear[y]||Array(12).fill(null));
+    byYear[y][mo-1]=(byYear[y][mo-1]||0)+r[6];S.add(y);}
+  const years=[...S].sort();
+  const W=460,H=250,PL=42,PR=12,PT=14,PB=24, iw=W-PL-PR, ih=H-PT-PB;
+  let ymax=1;years.forEach(y=>byYear[y].forEach(v=>{if(v!=null&&v>ymax)ymax=v;}));ymax*=1.12;
+  const x=i=>PL+i/11*iw, y=v=>PT+ih-(v/ymax)*ih;
+  // colour years: older = dim, latest = accent
+  const yc=y=>{const k=years.indexOf(y),last=years.length-1;
+    if(k===last)return css('--accent');
+    const t=last>0?k/(last):0; return `hsl(${205+t*20},${30+t*30}%,${40+t*20}%)`;};
+  let svg=`<svg viewBox="0 0 ${W} ${H}">`;
+  for(let g=0;g<=4;g++){const gy=PT+ih-(g/4)*ih;
+    svg+=`<line class="gridline" x1="${PL}" y1="${gy}" x2="${W-PR}" y2="${gy}"/>`;
+    svg+=`<text class="axis" x="${PL-7}" y="${gy+3}" text-anchor="end">${fmt(Math.round(ymax*g/4))}</text>`;}
+  const mlab=['J','F','M','A','M','J','J','A','S','O','N','D'];
+  mlab.forEach((L,i)=>svg+=`<text class="axis" x="${x(i)}" y="${H-7}" text-anchor="middle">${L}</text>`);
+  const path=vals=>{let d='',st=false;vals.forEach((v,i)=>{if(v==null){st=false;return;}d+=(st?'L':'M')+x(i).toFixed(1)+','+y(v).toFixed(1)+' ';st=true;});return d;};
+  years.forEach(yr=>{const col=yc(yr),last=yr===years[years.length-1];
+    svg+=`<path d="${path(byYear[yr])}" fill="none" stroke="${col}" stroke-width="${last?2.6:1.6}" stroke-opacity="${last?1:.75}"/>`;
+    byYear[yr].forEach((v,i)=>{if(v==null)return;
+      svg+=`<rect x="${x(i)-6}" y="${PT}" width="12" height="${ih}" fill="transparent" onmousemove="showTip(event,'<b>${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][i]} ${yr}</b> · ${fmt(v)}')" onmouseleave="hideTip()"/>`;
+      if(last)svg+=`<circle cx="${x(i)}" cy="${y(v)}" r="2.4" fill="${col}"/>`;});});
+  svg+='</svg>';
+  $('#seasonChart').innerHTML=svg;
+  $('#seasonLegend').innerHTML=years.map(yr=>`<span><i style="background:${yc(yr)}"></i>${yr}</span>`).join('');
+  $('#seasonMeta').textContent='monthly registrations by year';
+}
+
+/* ---------- market share & movers (period vs previous comparable period) ---------- */
+function prevPeriodMonths(period){
+  const M=DATA.dims.months, idx=M.indexOf(ST.month);
+  if(ST.period==='month') return idx>0?[M[idx-1]]:[];
+  if(ST.period==='r12') return M.slice(Math.max(0,idx-23),Math.max(0,idx-11));
+  if(ST.period==='ytd'){const py=String(+ST.month.slice(0,4)-1);
+    return period.map(m=>py+m.slice(4)).filter(m=>M.includes(m));}
+  return []; // all → no comparison
+}
+function drawMovers(period){
+  const D=DATA.dims, PS=new Set(period), prev=prevPeriodMonths(period), PP=new Set(prev);
+  const cur={},pre={};let curTot=0,preTot=0;
+  for(const r of DATA.rows){
+    if(!segMatch(r[1])||!opMatch(r[2]))continue;
+    const b=D.brands[r[3]], m=D.months[r[0]];
+    if(PS.has(m)){cur[b]=(cur[b]||0)+r[6];curTot+=r[6];}
+    if(PP.has(m)){pre[b]=(pre[b]||0)+r[6];preTot+=r[6];}
+  }
+  const rows=Object.entries(cur).map(([b,v])=>{
+    const sh=curTot?v/curTot*100:0, psh=preTot?((pre[b]||0)/preTot*100):null;
+    return {b,v,sh,delta:psh==null?null:sh-psh};
+  }).sort((a,b)=>b.v-a.v).slice(0,10);
+  const maxSh=Math.max(1,...rows.map(d=>d.sh));
+  const perL={month:labelMonth(ST.month),ytd:`YTD ${ST.month.slice(0,4)}`,r12:'last 12 mo',all:'all-time'}[ST.period];
+  $('#moversMeta').textContent = prev.length? `share this ${perL} · Δ vs previous` : `share · ${perL}`;
+  let h='<thead><tr><th>Brand</th><th>Share</th><th>Δ pp</th></tr></thead><tbody>';
+  for(const d of rows){
+    const bar=(d.sh/maxSh*100).toFixed(0);
+    const dl = d.delta==null?'—':
+      `<span class="delta ${d.delta>=0?'up':'down'}"><span class="arr">${d.delta>=0?'▲':'▼'}</span> ${Math.abs(d.delta).toFixed(1)}</span>`;
+    h+=`<tr><td>${esc(d.b)}</td>`+
+       `<td><span style="display:inline-flex;align-items:center;gap:8px;justify-content:flex-end">`+
+       `<span style="height:6px;width:${bar}px;max-width:120px;background:var(--accent);border-radius:3px;display:inline-block"></span>`+
+       `${d.sh.toFixed(1)}%</span></td>`+
+       `<td>${dl}</td></tr>`;
+  }
+  h+='</tbody>';
+  $('#moversChart').innerHTML='<table>'+h+'</table>';
+}
 
 /* ---------- tooltip ---------- */
 const tip=$('#tip');
