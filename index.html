@@ -590,13 +590,15 @@ function multiLine(elId, series, period, opts={}){
   // hover: nearest month, all series
   M.forEach((m,i)=>{const hw=iw/Math.max(1,n-1);
     const body=series.map(s=>s.values[i]==null?null:`<span style="color:${s.color}">${esc(s.name)}</span> ${opts.pct?s.values[i].toFixed(1)+'%':fmt(s.values[i])}`).filter(Boolean).join('<br>');
-    if(body)svg+=`<rect x="${x(i)-hw/2}" y="${PT}" width="${hw}" height="${ih}" fill="transparent" onmousemove="showTip(event,'<b>${labelMonth(m)}</b><br>${body}')" onmouseleave="hideTip()"/>`;});
+    if(body){const id=TIPS.push(`<b>${labelMonth(m)}</b><br>${body}`)-1;
+      svg+=`<rect x="${x(i)-hw/2}" y="${PT}" width="${hw}" height="${ih}" fill="transparent" onmousemove="tipAt(event,${id})" onmouseleave="hideTip()"/>`;}});
   svg+='</svg>';
   $(elId).innerHTML=svg;
 }
 
 /* ============================ render ============================ */
 function render(){
+  TIPS=[];
   const D=DATA.dims, rows=rowsFiltered();
   // model selection narrows the headline view (KPIs, trends, mix); the ranking
   // panels stay at brand level so they keep their context.
@@ -1086,7 +1088,8 @@ function drawPowertrain(period){
     svg+=`<text class="axis" x="${x(i)}" y="${H-8}" text-anchor="middle">${yy}</text>`;}});
   M.forEach((m,i)=>{const hw=iw/Math.max(1,M.length-1);if(!tot[i])return;
     const body=order.slice().reverse().filter(dt=>mat[i][dt]).map(dt=>`<span style="color:${css(DT_COLORS[dt])}">${dt}</span> ${((mat[i][dt]||0)/tot[i]*100).toFixed(1)}%`).join('<br>');
-    svg+=`<rect x="${x(i)-hw/2}" y="${PT}" width="${hw}" height="${ih}" fill="transparent" onmousemove="showTip(event,'<b>${labelMonth(m)}</b> · ${fmt(tot[i])} units<br>${body}')" onmouseleave="hideTip()"/>`;});
+    const id=TIPS.push(`<b>${labelMonth(m)}</b> · ${fmt(tot[i])} units<br>${body}`)-1;
+    svg+=`<rect x="${x(i)-hw/2}" y="${PT}" width="${hw}" height="${ih}" fill="transparent" onmousemove="tipAt(event,${id})" onmouseleave="hideTip()"/>`;});
   svg+='</svg>';
   $('#powChart').innerHTML=svg;
   $('#powLegend').innerHTML=order.slice().reverse().map(d=>`<span><i style="background:${css(DT_COLORS[d])}"></i>${d}</span>`).join('');
@@ -1169,6 +1172,10 @@ function drawMovers(period){
 
 /* ---------- tooltip ---------- */
 const tip=$('#tip');
+// registry so charts can carry rich (quote-containing) tooltip HTML without
+// embedding it inside an SVG attribute (which would break on nested quotes)
+let TIPS=[];
+function tipAt(e,i){showTip(e,TIPS[i]);}
 function showTip(e,html){tip.innerHTML=html;tip.style.opacity=1;
   let x=e.clientX+14,y=e.clientY+14;if(x>innerWidth-220)x=e.clientX-210;tip.style.left=x+'px';tip.style.top=y+'px';}
 function hideTip(){tip.style.opacity=0;}
