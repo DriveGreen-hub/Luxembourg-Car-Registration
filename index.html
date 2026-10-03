@@ -98,6 +98,20 @@
   .cmp-chip .rm:hover{color:var(--down);background:#ffffff10}
   .cmp-hint{font-family:var(--mono);font-size:11px;color:var(--dim)}
   .cmp-tbl td.series{font-family:var(--body);color:var(--txt);font-weight:600}
+  /* ---------- milestones strip ---------- */
+  .milestones{display:flex;flex-wrap:wrap;gap:9px;margin-bottom:14px}
+  .ms{display:flex;flex-direction:column;gap:2px;padding:8px 12px;border-radius:10px;
+     background:var(--panel2);border:1px solid var(--line);min-width:92px}
+  .ms .lab{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+  .ms .val{font-family:var(--disp);font-weight:700;font-size:15px}
+  .ms.proj{border-style:dashed;border-color:var(--accent2)}
+  .ms.proj .val{color:var(--accent2)}
+  .ms.hit .val{color:var(--accent)}
+  /* ---------- chart-range + freshness ---------- */
+  .rangebar{display:flex;flex-wrap:wrap;gap:14px;align-items:center;justify-content:space-between;margin:0 0 16px}
+  .fresh{font-family:var(--mono);font-size:11.5px;color:var(--mut);display:flex;gap:16px;flex-wrap:wrap}
+  .fresh b{color:var(--accent);font-weight:700}
+  .fresh .warn{color:var(--accent2)}
   .cmp-tbl .sw{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;vertical-align:middle}
   .btn{appearance:none;border:1px solid var(--line2);background:var(--panel);color:var(--mut);font-family:var(--mono);
      font-size:11.5px;font-weight:500;padding:9px 13px;border-radius:10px;cursor:pointer;transition:.15s;letter-spacing:.03em}
@@ -237,6 +251,19 @@
     <div class="cmp-chips" id="cmpChips"><span class="cmp-hint">Add up to 4 brands or models to overlay them on the trend &amp; BEV-share charts.</span></div>
   </div>
 
+  <!-- ===== chart range + data freshness ===== -->
+  <div class="rangebar">
+    <div class="ctl" style="flex-direction:row;align-items:center;gap:10px">
+      <label style="margin:0">Chart range</label>
+      <div class="seg" id="rangeSel">
+        <button data-v="2y">2Y</button>
+        <button data-v="5y">5Y</button>
+        <button data-v="all" class="on">All</button>
+      </div>
+    </div>
+    <div class="fresh" id="freshBox"></div>
+  </div>
+
   <!-- ===== KPIs ===== -->
   <div class="kpis" id="kpis"></div>
 
@@ -260,6 +287,22 @@
     <div class="legend">
       <span><i style="background:var(--bev)"></i>BEV share %</span>
       <span><i style="background:var(--accent2)"></i>3-month average</span>
+    </div>
+  </div>
+
+  <!-- ===== BEV adoption forecast (S-curve) + milestones ===== -->
+  <div class="panel" style="margin-bottom:16px">
+    <div class="ph">
+      <div><h3 id="fcTitle">BEV adoption forecast · logistic S-curve</h3></div>
+      <div class="meta" id="fcMeta"></div>
+    </div>
+    <div id="milestones" class="milestones"></div>
+    <div id="fcChart"></div>
+    <div class="legend">
+      <span><i style="background:var(--bev)"></i>actual BEV share</span>
+      <span><i style="background:var(--accent2)"></i>fitted + projected curve</span>
+      <span><i style="background:#ffffff22"></i>uncertainty band</span>
+      <span class="cmp-hint">model assumes a 100% ceiling · tracks the recent trajectory · not an official forecast</span>
     </div>
   </div>
 
@@ -370,7 +413,7 @@ const fmt = n => n.toLocaleString('en-US');
 const $ = s => document.querySelector(s);
 
 let DATA=null;
-const BUILD='2026-09-24c';   // bump on each frontend change so the live version is verifiable
+const BUILD='2026-10-03a';   // bump on each frontend change so the live version is verifiable
 
 async function boot(){
   try{
@@ -386,7 +429,12 @@ async function boot(){
 }
 
 /* ============================ state ============================ */
-const ST = {seg:'car', op:'new', month:null, period:'month', brand:'', model:'', dt:new Set(['BEV','PHEV','HEV','Petrol','Diesel','Other']), compare:[]};
+const ST = {seg:'car', op:'new', month:null, period:'month', brand:'', model:'', dt:new Set(['BEV','PHEV','HEV','Petrol','Diesel','Other']), compare:[], range:'all'};
+// start index for the continuous time-series charts, from the chart-range toggle
+function winStart(){const n=DATA.dims.months.length;
+  if(ST.range==='2y')return Math.max(0,n-24);
+  if(ST.range==='5y')return Math.max(0,n-60);
+  return 0;}
 let BRAND_SET=new Set(), MODEL_BY_LABEL={}, BRANDS_SORTED=[], MODEL_LABELS=[];
 // compare: independent full lookup of every brand + model, and a colour palette
 const CMP_COLORS=['#5ad1c8','#ffb347','#6c8cff','#ff6b9d'];
@@ -416,6 +464,7 @@ function init(){
   bindSeg('#segSel','seg'); bindSeg('#opSel','op');
   msel.onchange=e=>{ST.month=e.target.value;render();};
   $('#periodSel').onchange=e=>{ST.period=e.target.value;render();};
+  bindSeg('#rangeSel','range');
   // Brand combobox
   makeCombo('#brandSel','#brandOpts',
     ()=>BRANDS_SORTED,
@@ -571,25 +620,25 @@ function cmpMonthly(item){
 // shared multi-line renderer for the compare overlays
 function multiLine(elId, series, period, opts={}){
   // series: [{name,color,values:[per month, null-able]}]
-  const M=DATA.dims.months, n=M.length;
+  const M=DATA.dims.months, n=M.length, i0=winStart(), span=Math.max(1,n-1-i0);
   const W=920,H=opts.H||260,PL=44,PR=14,PT=14,PB=26, iw=W-PL-PR, ih=H-PT-PB;
-  const all=[].concat(...series.map(s=>s.values.filter(v=>v!=null)));
+  const all=[].concat(...series.map(s=>s.values.slice(i0).filter(v=>v!=null)));
   const ymax=Math.max(opts.min||1,...all)*1.14;
-  const x=i=>PL+(n<=1?iw/2:i/(n-1)*iw), y=v=>PT+ih-(v/ymax)*ih;
+  const x=i=>PL+(n<=1?iw/2:(i-i0)/span*iw), y=v=>PT+ih-(v/ymax)*ih;
   const fmtY=opts.pct?(v=>Math.round(v)+'%'):(v=>fmt(Math.round(v)));
   let svg=`<svg viewBox="0 0 ${W} ${H}">`;
   for(let g=0;g<=4;g++){const gy=PT+ih-(g/4)*ih;
     svg+=`<line class="gridline" x1="${PL}" y1="${gy}" x2="${W-PR}" y2="${gy}"/>`;
     svg+=`<text class="axis" x="${PL-7}" y="${gy+3}" text-anchor="end">${fmtY(ymax*g/4)}</text>`;}
-  if(period&&period.length){const xs=x(M.indexOf(period[0])),xe=x(M.indexOf(period[period.length-1]));
+  if(period&&period.length){const pi=Math.max(i0,M.indexOf(period[0]));const xs=x(pi),xe=x(M.indexOf(period[period.length-1]));
     svg+=`<rect x="${xs-3}" y="${PT}" width="${Math.max(6,xe-xs)+6}" height="${ih}" fill="none" stroke="${css('--accent2')}" stroke-dasharray="3 3" stroke-width="1.1" rx="4"/>`;}
   // year ticks
-  let ly=null;M.forEach((m,i)=>{const yy=m.slice(0,4);if(yy!==ly){ly=yy;
+  let ly=null;M.forEach((m,i)=>{if(i<i0)return;const yy=m.slice(0,4);if(yy!==ly){ly=yy;
     svg+=`<text class="axis" x="${x(i)}" y="${H-8}" text-anchor="middle">${yy}</text>`;}});
-  const path=vals=>{let d='',st=false;vals.forEach((v,i)=>{if(v==null){st=false;return;}d+=(st?'L':'M')+x(i).toFixed(1)+','+y(v).toFixed(1)+' ';st=true;});return d;};
+  const path=vals=>{let d='',st=false;vals.forEach((v,i)=>{if(i<i0||v==null){st=false;return;}d+=(st?'L':'M')+x(i).toFixed(1)+','+y(v).toFixed(1)+' ';st=true;});return d;};
   series.forEach(s=>{svg+=`<path d="${path(s.values)}" fill="none" stroke="${s.color}" stroke-width="2.2" stroke-linejoin="round"/>`;});
   // hover: nearest month, all series
-  M.forEach((m,i)=>{const hw=iw/Math.max(1,n-1);
+  M.forEach((m,i)=>{if(i<i0)return;const hw=iw/span;
     const body=series.map(s=>s.values[i]==null?null:`<span style="color:${s.color}">${esc(s.name)}</span> ${opts.pct?s.values[i].toFixed(1)+'%':fmt(s.values[i])}`).filter(Boolean).join('<br>');
     if(body){const id=TIPS.push(`<b>${labelMonth(m)}</b><br>${body}`)-1;
       svg+=`<rect x="${x(i)-hw/2}" y="${PT}" width="${hw}" height="${ih}" fill="transparent" onmousemove="tipAt(event,${id})" onmouseleave="hideTip()"/>`;}});
@@ -617,6 +666,8 @@ function render(){
   drawImports(period);
   drawTable(rows,period);
   drawPowertrain(period);
+  drawForecast();
+  drawFreshness();
   drawSeasonality(rowsSel);
   drawMovers(period);
   // compare table (shown only when there are series to compare)
@@ -701,45 +752,46 @@ function drawTrend(rows,period){
     return;
   }
   const M=DATA.dims.months, DTs=DATA.dims.drivetrains.filter(d=>ST.dt.has(d));
+  const i0=winStart(), span=Math.max(1,M.length-1-i0);
   const W=920,H=300,PL=44,PR=12,PT=14,PB=26, iw=W-PL-PR, ih=H-PT-PB;
   // matrix month x dt
   const mat=M.map(()=>({}));
   for(const r of rows){const dt=DATA.dims.drivetrains[r[5]];mat[r[0]][dt]=(mat[r[0]][dt]||0)+r[6];}
   const totals=M.map((_,i)=>DTs.reduce((s,d)=>s+(mat[i][d]||0),0));
-  const ymax=Math.max(1,...totals)*1.08;
-  const x=i=>PL+ (M.length<=1?iw/2: i/(M.length-1)*iw);
+  const ymax=Math.max(1,...totals.slice(i0))*1.08;
+  const x=i=>PL+ (M.length<=1?iw/2: (i-i0)/span*iw);
   const y=v=>PT+ih-(v/ymax)*ih;
   let svg=`<svg viewBox="0 0 ${W} ${H}" id="trendSvg">`;
   // gridlines
   for(let g=0;g<=4;g++){const gy=PT+ih-(g/4)*ih;const gv=Math.round(ymax*g/4);
     svg+=`<line class="gridline" x1="${PL}" y1="${gy}" x2="${W-PR}" y2="${gy}"/>`;
     svg+=`<text class="axis" x="${PL-8}" y="${gy+3}" text-anchor="end">${fmt(gv)}</text>`;}
-  // stacked areas
-  const baseline=M.map(()=>PT+ih);
+  // stacked areas (windowed)
+  const baseline={};for(let i=i0;i<M.length;i++)baseline[i]=PT+ih;
   DTs.slice().reverse().forEach(dt=>{
     let top=[],bot=[];
-    for(let i=0;i<M.length;i++){const v=mat[i][dt]||0;const prevTop=baseline[i];const newTop=prevTop-(v/ymax)*ih;
+    for(let i=i0;i<M.length;i++){const v=mat[i][dt]||0;const prevTop=baseline[i];const newTop=prevTop-(v/ymax)*ih;
       top.push([x(i),newTop]);bot.push([x(i),prevTop]);baseline[i]=newTop;}
     const d=top.map((p,i)=>`${i?'L':'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ')
            +' '+bot.reverse().map(p=>`L${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ')+'Z';
     svg+=`<path d="${d}" fill="${css(DT_COLORS[dt])}" fill-opacity="0.82"/>`;
   });
   // total line
-  const linePts=M.map((_,i)=>`${x(i)},${y(totals[i])}`).join(' ');
+  const linePts=M.map((_,i)=>i<i0?null:`${x(i)},${y(totals[i])}`).filter(Boolean).join(' ');
   svg+=`<polyline points="${linePts}" fill="none" stroke="#ffffff" stroke-opacity=".55" stroke-width="1.4"/>`;
   // period highlight band
   const ps=period[0],pe=period[period.length-1];
-  const xs=x(M.indexOf(ps)), xe=x(M.indexOf(pe));
+  const xs=x(Math.max(i0,M.indexOf(ps))), xe=x(M.indexOf(pe));
   const bw=Math.max(6,xe-xs);
   svg+=`<rect x="${xs-3}" y="${PT}" width="${bw+6}" height="${ih}" fill="none" stroke="${css('--accent2')}" stroke-dasharray="3 3" stroke-width="1.3" rx="4"/>`;
   // x labels: one tick per year boundary (clean, never overlaps)
   let lastY=null;
-  M.forEach((m,i)=>{const y=m.slice(0,4);
+  M.forEach((m,i)=>{if(i<i0)return;const y=m.slice(0,4);
     if(y!==lastY){lastY=y;
       svg+=`<line x1="${x(i)}" y1="${PT}" x2="${x(i)}" y2="${PT+ih}" stroke="${css('--line')}" stroke-width="1" stroke-opacity=".5"/>`;
       svg+=`<text class="axis" x="${x(i)}" y="${H-8}" text-anchor="middle">${y}</text>`;}});
   // hover hit areas
-  M.forEach((m,i)=>{const hw=iw/Math.max(1,M.length-1);
+  M.forEach((m,i)=>{if(i<i0)return;const hw=iw/span;
     svg+=`<rect x="${x(i)-hw/2}" y="${PT}" width="${hw}" height="${ih}" fill="transparent"
       onmousemove="trendTip(event,${i})" onmouseleave="hideTip()"/>`;});
   svg+='</svg>';
@@ -823,30 +875,31 @@ function drawAdoption(period){
     if(D.drivetrains[r[5]]==='BEV')bev[r[0]]+=r[6];
   }
   const share=M.map((m,i)=>tot[i]>0?bev[i]/tot[i]*100:null);
-  const avg=share.map((v,i)=>{let s=0,n=0;for(let j=i-2;j<=i;j++)if(j>=0&&share[j]!=null){s+=share[j];n++;}return n?s/n:null;});
+  const avg=share.map((v,i)=>{let s=0,nn=0;for(let j=i-2;j<=i;j++)if(j>=0&&share[j]!=null){s+=share[j];nn++;}return nn?s/nn:null;});
+  const i0=winStart(), span=Math.max(1,M.length-1-i0);
   const W=920,H=240,PL=44,PR=14,PT=14,PB=26, iw=W-PL-PR, ih=H-PT-PB;
-  const vals=share.filter(v=>v!=null);
+  const vals=share.slice(i0).filter(v=>v!=null);
   const ymax=Math.max(10,...vals)*1.15;
-  const n=M.length, x=i=>PL+(n<=1?iw/2:i/(n-1)*iw), y=v=>PT+ih-(v/ymax)*ih;
+  const n=M.length, x=i=>PL+(n<=1?iw/2:(i-i0)/span*iw), y=v=>PT+ih-(v/ymax)*ih;
   const bevC=css('--bev'), avgC=css('--accent2');
   let svg=`<svg viewBox="0 0 ${W} ${H}">`;
   for(let g=0;g<=4;g++){const gy=PT+ih-(g/4)*ih;
     svg+=`<line class="gridline" x1="${PL}" y1="${gy}" x2="${W-PR}" y2="${gy}"/>`;
     svg+=`<text class="axis" x="${PL-7}" y="${gy+3}" text-anchor="end">${Math.round(ymax*g/4)}%</text>`;}
-  if(period&&period.length){const xs=x(M.indexOf(period[0])),xe=x(M.indexOf(period[period.length-1]));
+  if(period&&period.length){const xs=x(Math.max(i0,M.indexOf(period[0]))),xe=x(M.indexOf(period[period.length-1]));
     svg+=`<rect x="${xs-3}" y="${PT}" width="${Math.max(6,xe-xs)+6}" height="${ih}" fill="${bevC}" fill-opacity=".05" stroke="${avgC}" stroke-dasharray="3 3" stroke-width="1.1" rx="4"/>`;}
-  const path=series=>{let d='',st=false;series.forEach((v,i)=>{if(v==null){st=false;return;}d+=(st?'L':'M')+x(i).toFixed(1)+','+y(v).toFixed(1)+' ';st=true;});return d;};
+  const path=series=>{let d='',st=false;series.forEach((v,i)=>{if(i<i0||v==null){st=false;return;}d+=(st?'L':'M')+x(i).toFixed(1)+','+y(v).toFixed(1)+' ';st=true;});return d;};
   let area='',rs=null;
-  share.forEach((v,i)=>{if(v==null){if(rs!=null){area+=`M${x(rs)},${PT+ih} `;for(let j=rs;j<i;j++)area+=`L${x(j)},${y(share[j])} `;area+=`L${x(i-1)},${PT+ih} Z `;rs=null;}}else if(rs==null)rs=i;});
+  share.forEach((v,i)=>{if(i<i0||v==null){if(rs!=null){area+=`M${x(rs)},${PT+ih} `;for(let j=rs;j<i;j++)area+=`L${x(j)},${y(share[j])} `;area+=`L${x(i-1)},${PT+ih} Z `;rs=null;}}else if(rs==null)rs=i;});
   if(rs!=null){area+=`M${x(rs)},${PT+ih} `;for(let j=rs;j<n;j++)if(share[j]!=null)area+=`L${x(j)},${y(share[j])} `;area+=`L${x(n-1)},${PT+ih} Z`;}
   svg+=`<path d="${area}" fill="${bevC}" fill-opacity=".12"/>`;
   svg+=`<path d="${path(avg)}" fill="none" stroke="${avgC}" stroke-width="3" stroke-opacity=".8" stroke-linejoin="round"/>`;
   svg+=`<path d="${path(share)}" fill="none" stroke="${bevC}" stroke-width="2"/>`;
-  share.forEach((v,i)=>{if(v==null)return;
+  share.forEach((v,i)=>{if(i<i0||v==null)return;
     svg+=`<circle cx="${x(i)}" cy="${y(v)}" r="2.4" fill="${bevC}"/>`;
-    const hw=iw/Math.max(1,n-1);
+    const hw=iw/span;
     svg+=`<rect x="${x(i)-hw/2}" y="${PT}" width="${hw}" height="${ih}" fill="transparent" onmousemove="showTip(event,'<b>${labelMonth(M[i])}</b> · ${v.toFixed(1)}% BEV<br>${fmt(bev[i])} of ${fmt(tot[i])}')" onmouseleave="hideTip()"/>`;});
-  let ly=null;M.forEach((m,i)=>{const yy=m.slice(0,4);if(yy!==ly){ly=yy;svg+=`<text class="axis" x="${x(i)}" y="${H-8}" text-anchor="middle">${yy}</text>`;}});
+  let ly=null;M.forEach((m,i)=>{if(i<i0)return;const yy=m.slice(0,4);if(yy!==ly){ly=yy;svg+=`<text class="axis" x="${x(i)}" y="${H-8}" text-anchor="middle">${yy}</text>`;}});
   svg+='</svg>';
   $('#adoptChart').innerHTML=svg;
   const PS=new Set(period);let pb=0,pt=0;M.forEach((m,i)=>{if(PS.has(m)){pb+=bev[i];pt+=tot[i];}});
@@ -1067,33 +1120,44 @@ function drawPowertrain(period){
   const tot=M.map((_,i)=>Object.values(mat[i]).reduce((a,b)=>a+b,0));
   // stack order bottom→top: combustion at the base, electrified on top
   const order=['Diesel','Petrol','Other','HEV','PHEV','BEV'];
+  const i0=winStart(), span=Math.max(1,M.length-1-i0);
   const W=920,H=260,PL=40,PR=14,PT=12,PB=26, iw=W-PL-PR, ih=H-PT-PB;
-  const x=i=>PL+(M.length<=1?iw/2:i/(M.length-1)*iw), y=f=>PT+ih-f*ih;
+  const x=i=>PL+(M.length<=1?iw/2:(i-i0)/span*iw), y=f=>PT+ih-f*ih;
   let svg=`<svg viewBox="0 0 ${W} ${H}">`;
   for(let g=0;g<=4;g++){const gy=PT+ih-(g/4)*ih;
     svg+=`<line class="gridline" x1="${PL}" y1="${gy}" x2="${W-PR}" y2="${gy}"/>`;
     svg+=`<text class="axis" x="${PL-7}" y="${gy+3}" text-anchor="end">${g*25}%</text>`;}
-  const base=M.map(()=>0);
+  const base={};for(let i=i0;i<M.length;i++)base[i]=0;
   order.forEach(dt=>{
     let top=[],bot=[];
-    for(let i=0;i<M.length;i++){const f=tot[i]?(mat[i][dt]||0)/tot[i]:0;
+    for(let i=i0;i<M.length;i++){const f=tot[i]?(mat[i][dt]||0)/tot[i]:0;
       const b=base[i], t=b+f; bot.push([x(i),y(b)]); top.push([x(i),y(t)]); base[i]=t;}
     const d=top.map((p,i)=>`${i?'L':'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ')
       +' '+bot.reverse().map(p=>`L${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ')+'Z';
     svg+=`<path d="${d}" fill="${css(DT_COLORS[dt])}" fill-opacity="0.85"/>`;
   });
+  // electrified (BEV+PHEV+HEV) vs combustion crossover: mark first month electrified ≥ 50%
+  let xi=-1;
+  for(let i=Math.max(1,i0);i<M.length;i++){if(!tot[i])continue;
+    const el=((mat[i].BEV||0)+(mat[i].PHEV||0)+(mat[i].HEV||0))/tot[i];
+    if(el>=0.5){xi=i;break;}}
+  if(xi>=0){const cx=x(xi);
+    svg+=`<line x1="${cx}" y1="${PT}" x2="${cx}" y2="${PT+ih}" stroke="#fff" stroke-opacity=".9" stroke-width="1.4" stroke-dasharray="4 3"/>`;
+    svg+=`<text x="${cx}" y="${PT+11}" text-anchor="${cx>W-120?'end':'start'}" dx="${cx>W-120?-6:6}" style="font-family:var(--mono);font-size:10px;fill:#fff">electrified &gt; 50% · ${labelMonth(M[xi])}</text>`;}
   // period highlight
-  const xs=x(M.indexOf(period[0])),xe=x(M.indexOf(period[period.length-1]));
+  const xs=x(Math.max(i0,M.indexOf(period[0]))),xe=x(M.indexOf(period[period.length-1]));
   svg+=`<rect x="${xs-3}" y="${PT}" width="${Math.max(6,xe-xs)+6}" height="${ih}" fill="none" stroke="#fff" stroke-opacity=".5" stroke-dasharray="3 3" stroke-width="1.1" rx="4"/>`;
-  let ly=null;M.forEach((m,i)=>{const yy=m.slice(0,4);if(yy!==ly){ly=yy;
+  let ly=null;M.forEach((m,i)=>{if(i<i0)return;const yy=m.slice(0,4);if(yy!==ly){ly=yy;
     svg+=`<text class="axis" x="${x(i)}" y="${H-8}" text-anchor="middle">${yy}</text>`;}});
-  M.forEach((m,i)=>{const hw=iw/Math.max(1,M.length-1);if(!tot[i])return;
+  M.forEach((m,i)=>{if(i<i0)return;const hw=iw/span;if(!tot[i])return;
+    const el=((mat[i].BEV||0)+(mat[i].PHEV||0)+(mat[i].HEV||0))/tot[i]*100;
     const body=order.slice().reverse().filter(dt=>mat[i][dt]).map(dt=>`<span style="color:${css(DT_COLORS[dt])}">${dt}</span> ${((mat[i][dt]||0)/tot[i]*100).toFixed(1)}%`).join('<br>');
-    const id=TIPS.push(`<b>${labelMonth(m)}</b> · ${fmt(tot[i])} units<br>${body}`)-1;
+    const id=TIPS.push(`<b>${labelMonth(m)}</b> · ${fmt(tot[i])} units<br>${body}<br><span style="color:var(--mut)">electrified</span> ${el.toFixed(1)}%`)-1;
     svg+=`<rect x="${x(i)-hw/2}" y="${PT}" width="${hw}" height="${ih}" fill="transparent" onmousemove="tipAt(event,${id})" onmouseleave="hideTip()"/>`;});
   svg+='</svg>';
   $('#powChart').innerHTML=svg;
-  $('#powLegend').innerHTML=order.slice().reverse().map(d=>`<span><i style="background:${css(DT_COLORS[d])}"></i>${d}</span>`).join('');
+  $('#powLegend').innerHTML=order.slice().reverse().map(d=>`<span><i style="background:${css(DT_COLORS[d])}"></i>${d}</span>`).join('')
+    + (xi>=0?`<span class="cmp-hint">dashed line = electrified (BEV+PHEV+HEV) first passed 50% in ${labelMonth(M[xi])}</span>`:'');
 }
 
 /* ---------- year-over-year seasonality (line per year, Jan..Dec) ---------- */
@@ -1169,6 +1233,110 @@ function drawMovers(period){
   }
   h+='</tbody>';
   $('#moversChart').innerHTML='<table>'+h+'</table>';
+}
+
+/* ---------- BEV adoption forecast (logistic / S-curve) ---------- */
+// convert a (possibly future) month index to "YYYY-MM"; index 0 == DATA.dims.months[0]
+function idxToYM(i){const[y0,m0]=DATA.dims.months[0].split('-').map(Number);
+  const t=(y0*12+(m0-1))+Math.round(i);return `${Math.floor(t/12)}-${String(t%12+1).padStart(2,'0')}`;}
+function fitLogistic(){
+  // overall BEV share for the current segment + registration type (ignores brand/model/dt)
+  const D=DATA.dims, M=D.months, bev=M.map(()=>0), tot=M.map(()=>0);
+  for(const r of DATA.rows){if(!segMatch(r[1])||!opMatch(r[2]))continue;
+    tot[r[0]]+=r[6]; if(D.drivetrains[r[5]]==='BEV')bev[r[0]]+=r[6];}
+  const share=M.map((_,i)=>tot[i]>0?bev[i]/tot[i]*100:null);
+  // weighted logit-linear regression, ceiling 100%, recency(24-mo half-life)+volume weights
+  const n=M.length, HL=24; let xs=[],ys=[],ws=[];
+  for(let i=0;i<n;i++){const s=share[i];if(s==null||s<=0.5||s>=99.5)continue;
+    const w=tot[i]*Math.exp(-((n-1)-i)/HL);
+    xs.push(i);ys.push(Math.log(s/(100-s)));ws.push(w);}
+  if(xs.length<6)return null;
+  const sw=ws.reduce((a,b)=>a+b,0);
+  const mx=xs.reduce((a,x,k)=>a+ws[k]*x,0)/sw, my=ys.reduce((a,y,k)=>a+ws[k]*y,0)/sw;
+  let num=0,den=0;for(let k=0;k<xs.length;k++){num+=ws[k]*(xs[k]-mx)*(ys[k]-my);den+=ws[k]*(xs[k]-mx)**2;}
+  const b=num/den, a=my-b*mx;
+  let ss=0;for(let k=0;k<xs.length;k++){const e=ys[k]-(a+b*xs[k]);ss+=e*e;}
+  const sd=Math.sqrt(ss/xs.length);
+  const f=i=>100/(1+Math.exp(-(a+b*i)));
+  const band=(i,z)=>100/(1+Math.exp(-((a+b*i)+z)));   // z in logit space
+  const cross=t=>b!==0?(Math.log(t/(100-t))-a)/b:null;  // index where fit==t%
+  return {a,b,sd,share,bev,tot,f,band,cross,n};
+}
+function drawForecast(){
+  const el=$('#fcChart'), mEl=$('#milestones');
+  const fit=fitLogistic();
+  if(!fit){el.innerHTML='<p style="color:var(--dim);font-family:var(--mono);font-size:12px;padding:10px">Not enough history to fit a curve for this selection.</p>';
+    mEl.innerHTML='';$('#fcMeta').textContent='';return;}
+  const D=DATA.dims, M=D.months, i0=winStart();
+  // horizon: a bit past the 95% crossing, capped
+  let c95=fit.cross(95); if(!isFinite(c95)||c95==null)c95=fit.n+96;
+  const hz=Math.min(Math.max(fit.n+6, Math.ceil(c95)+4), fit.n+120);
+  const W=920,H=300,PL=44,PR=14,PT=14,PB=26, iw=W-PL-PR, ih=H-PT-PB;
+  const span=Math.max(1,hz-i0), x=i=>PL+(i-i0)/span*iw, y=v=>PT+ih-(v/100)*ih;
+  let svg=`<svg viewBox="0 0 ${W} ${H}">`;
+  for(let g=0;g<=4;g++){const gy=PT+ih-(g/4)*ih;
+    svg+=`<line class="gridline" x1="${PL}" y1="${gy}" x2="${W-PR}" y2="${gy}"/>`;
+    svg+=`<text class="axis" x="${PL-7}" y="${gy+3}" text-anchor="end">${g*25}%</text>`;}
+  // target lines 50/80
+  [50,80].forEach(t=>{svg+=`<line x1="${PL}" y1="${y(t)}" x2="${W-PR}" y2="${y(t)}" stroke="${css('--accent2')}" stroke-opacity=".35" stroke-dasharray="2 4" stroke-width="1"/>`;});
+  // "today" divider
+  const xt=x(fit.n-1);
+  svg+=`<line x1="${xt}" y1="${PT}" x2="${xt}" y2="${PT+ih}" stroke="#fff" stroke-opacity=".25" stroke-width="1"/>`;
+  svg+=`<text class="axis" x="${xt}" y="${PT+11}" text-anchor="middle" style="fill:#fff;opacity:.5">today</text>`;
+  // uncertainty band (±1.5 logit-sd) across the whole x-range
+  let up='',lo='';
+  for(let i=i0;i<=hz;i++){up+=(i===i0?'M':'L')+x(i).toFixed(1)+','+y(fit.band(i,1.5*fit.sd)).toFixed(1)+' ';}
+  for(let i=hz;i>=i0;i--){lo+='L'+x(i).toFixed(1)+','+y(fit.band(i,-1.5*fit.sd)).toFixed(1)+' ';}
+  svg+=`<path d="${up}${lo}Z" fill="#ffffff" fill-opacity=".07"/>`;
+  // fitted + projected curve
+  let cd='';for(let i=i0;i<=hz;i++){cd+=(i===i0?'M':'L')+x(i).toFixed(1)+','+y(fit.f(i)).toFixed(1)+' ';}
+  svg+=`<path d="${cd}" fill="none" stroke="${css('--accent2')}" stroke-width="2.4"/>`;
+  // actual share dots (within window)
+  fit.share.forEach((s,i)=>{if(i<i0||s==null)return;
+    svg+=`<circle cx="${x(i)}" cy="${y(s)}" r="2.2" fill="${css('--bev')}"/>`;
+    const hw=iw/span;
+    svg+=`<rect x="${x(i)-hw/2}" y="${PT}" width="${hw}" height="${ih}" fill="transparent" onmousemove="showTip(event,'<b>${labelMonth(M[i])}</b> · actual ${s.toFixed(1)}% · model ${fit.f(i).toFixed(1)}%')" onmouseleave="hideTip()"/>`;});
+  // crossing markers for 50/80
+  [[50,css('--accent2')],[80,css('--accent2')]].forEach(([t,c])=>{const ci=fit.cross(t);
+    if(ci!=null&&ci>=i0&&ci<=hz){svg+=`<circle cx="${x(ci)}" cy="${y(t)}" r="3.4" fill="${c}" stroke="#0b0e11" stroke-width="1"/>`;}});
+  // year ticks across past+future
+  let ly=null;for(let i=i0;i<=hz;i++){const yy=idxToYM(i).slice(0,4);if(yy!==ly){ly=yy;
+    svg+=`<text class="axis" x="${x(i)}" y="${H-8}" text-anchor="middle">${yy}</text>`;}}
+  svg+='</svg>';
+  el.innerHTML=svg;
+  const segL={car:'passenger cars',van:'vans',bus:'buses',hdv:'HDV',all:'all vehicles'}[ST.seg];
+  $('#fcMeta').textContent=`${ {new:'brand-new',import:'used import',both:'new + import'}[ST.op] } ${segL} · now ${fit.share[fit.n-1]!=null?fit.share[fit.n-1].toFixed(1):'–'}% · model ${fit.f(fit.n-1).toFixed(1)}%`;
+  $('#fcTitle').textContent=`BEV adoption forecast · logistic S-curve`;
+  // ---- milestones ----
+  drawMilestones(fit);
+}
+function drawMilestones(fit){
+  const M=DATA.dims.months;
+  // actual crossings via rolling-3 smoothed share
+  const r3=i=>{let s=0,n=0;for(let j=i-2;j<=i;j++)if(j>=0&&fit.share[j]!=null){s+=fit.share[j];n++;}return n?s/n:null;};
+  const firstCross=t=>{for(let i=0;i<fit.n;i++){const v=r3(i);if(v!=null&&v>=t)return M[i];}return null;};
+  const cells=[];
+  [5,10,20,30].forEach(t=>{const ym=firstCross(t);if(ym)cells.push({lab:`${t}% reached`,val:labelMonth(ym),cls:'hit'});});
+  [50,80].forEach(t=>{const ci=fit.cross(t);
+    if(ci!=null&&isFinite(ci)){const now=fit.n-1;
+      if(ci<=now){const ym=firstCross(t);cells.push({lab:`${t}% reached`,val:ym?labelMonth(ym):labelMonth(idxToYM(ci)),cls:'hit'});}
+      else cells.push({lab:`${t}% projected`,val:labelMonth(idxToYM(ci)),cls:'proj'});}});
+  $('#milestones').innerHTML=cells.map(c=>`<div class="ms ${c.cls}"><span class="lab">${c.lab}</span><span class="val">${c.val}</span></div>`).join('');
+}
+
+/* ---------- data freshness ---------- */
+function drawFreshness(){
+  const M=DATA.dims.months, latest=DATA.meta.latest_month||M[M.length-1];
+  // next snapshot ≈ 7th of the month after the month the latest data completes
+  const [ly,lm]=latest.split('-').map(Number);
+  let ny=ly, nm=lm+2; while(nm>12){nm-=12;ny++;}   // latest completes month L; next snapshot (L+2 file) lands ~7th
+  const nextTxt=new Date(ny,nm-1,7).toLocaleDateString('en-US',{day:'numeric',month:'short',year:'numeric'});
+  const settling=M.slice(-2).map(labelMonth).join(' & ');
+  $('#freshBox').innerHTML=
+    `latest complete month <b>${labelMonth(latest)}</b>`+
+    `<span>built ${DATA.meta.generated||'—'}</span>`+
+    `<span>next snapshot ~<b>${nextTxt}</b></span>`+
+    `<span class="warn">${settling} may still revise slightly</span>`;
 }
 
 /* ---------- tooltip ---------- */
